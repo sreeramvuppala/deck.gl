@@ -29,7 +29,7 @@ import {createStore} from 'redux';
 import {Provider, connect} from 'react-redux';
 
 import {GL, createGLContext, Buffer, Program} from 'luma.gl';
-import {mat2, mat4, vec2, vec4} from 'gl-matrix';
+import {mat2, mat3, mat4, vec2, vec3, vec4} from 'gl-matrix';
 import autobind from 'autobind-decorator';
 import flattenDeep from 'lodash.flattendeep';
 
@@ -66,9 +66,15 @@ function preprocessData(rawData) {
   return {type: 'PREPROCESS', rawData};
 }
 
+/*
+In most mobile apps, vanilla MVC pattern will sometimes lead to the "gigantic controller" situation that all codes are implemented in controller class while View and Model classes are relative simple. This is because most apps are dealing with complicated business logic and all those business logic operations map to the controller. This actually defeats the intention of MVC pattern and leads to unseparable classes that are hard to test andn maintain.
+
+However, in our situation, MVC pattern works perfectly. In our visualization apps, View class are the most complicated part of the application, Model class can also be complicated if we'd like to implement some good data processing algorithms, such as PCA or t-SNE, and our Controller class can be very simple.
+*/
+
 
 ////
-/* Renderer classes
+/* Renderer classes (View)
 Renderers are responsible for data presentation. It knows how to generate renderable
 data. It handles all internal states of a rendering engine, such as WebGL.
 It also manages resources such as buffers, textures and programs
@@ -164,11 +170,11 @@ class WebGLRenderer extends Renderer {
     console.log("WebGLRenderer._intialize() done");
   }
 
-  newPerspectiveCamera({id = "main", eye, lookAt, up, fovY, near, far}) {
+  newPerspectiveCamera({id = "main", pos, anchor, up, fovY, near, far}) {
     this.cameraManager.newCamera({
       id: id,
-      eye: eye,
-      lookAt: lookAt,
+      pos: pos,
+      anchor: anchor,
       up: up,
       fovY: fovY,
       aspect: this.currentCanvas.width / this.currentCanvas.height,
@@ -291,7 +297,6 @@ class WebGLRenderer extends Renderer {
   }
 }
 
-////
 /* Resource manager classes
 They are very simple right now */
 class BufferManager {
@@ -423,11 +428,11 @@ class CameraManager {
     this.cameras = [];
   }
 
-  newCamera({id, eye, lookAt, up, fovY, aspect, near, far, type}) {
+  newCamera({id, pos, anchor, up, fovY, aspect, near, far, type}) {
     let camera = new Camera({
       id: id,
-      eye: eye,
-      lookAt: lookAt,
+      pos: pos,
+      anchor: anchor,
       up: up,
       fovY: fovY,
       aspect: aspect,
@@ -437,6 +442,12 @@ class CameraManager {
     });
 
     this.cameras.push(camera);
+  }
+
+  moveDefaultCameraToAnchor({distance}) {
+    this.cameras[0].moveToAnchor({
+      distance: distance
+    });
   }
 }
 
@@ -676,8 +687,8 @@ class WebGLInstancedTriangles extends RenderableMesh {
 
 ////
 /*
-Containers are data holders. They hold abstract data.
-Data are organized into layers (or a more general name here?)
+Containers are data holders.  (Model)
+They hold abstract data. Data are organized into layers (or a more general name here?)
 TODO: move camera array to renderer. Camera is more for presenting the data
 than the data itself
 */
@@ -953,14 +964,23 @@ Camera is renderer specific. Camera object should
 also indicating what target it wish to draw on
 */
 class Camera {
-  constructor({eye, lookAt, up, fovY, aspect, near, far, type}) {
+  constructor({pos, anchor, up, fovY, aspect, near, far, type}) {
+    this.pos = vec3.fromValues(pos[0], pos[1], pos[2]);
+    this.anchor = vec3.fromValues(anchor[0], anchor[1], anchor[2]);
+    this.up = vec3.fromValues(up[0], up[1], up[2]);
+    this.fovY = fovY;
+    this.aspect = aspect;
+    this.near = near;
+    this.far = far;
+    this.type = type;
+
     this.transformMatrices = new TranformMatrices();
 
     let viewMatrix = mat4.create();
     let projectionMatrix = mat4.create();
     let viewProjectionMatrix = mat4.create();
 
-    mat4.lookAt(viewMatrix, eye, lookAt, up);
+    mat4.lookAt(viewMatrix, pos, anchor, up);
     if (type === "perspective") {
       mat4.perspective(projectionMatrix, fovY, aspect, near, far)
     }
@@ -972,12 +992,26 @@ class Camera {
     this.transformMatrices.viewProjectionMatrix = viewProjectionMatrix;
   }
 
+  moveToAnchor({distance}) {
+
+    let transVector = vec3.create();
+
+    vec3.subtract(transVector, this.pos, this.anchor);
+    vec3.normalize(transVector, transVector);
+    vec3.scale(transVector, transVector, distance);
+
+    mat4.translate(this.transformMatrices.viewMatrix, this.transformMatrices.viewMatrix, transVector);
+    mat4.multiply(this.transformMatrices.viewProjectionMatrix, this.transformMatrices.projectionMatrix, this.transformMatrices.viewMatrix);
+  }
+
   getTransformMatrices() {
     return this.transformMatrices;
   }
 }
 
-/* Controller class */
+////
+/* Controller class (Controller)
+*/
 class Controller {
   constructor() {
     this.container = null;
@@ -987,17 +1021,6 @@ class Controller {
     if (typeof window !== 'undefined') {
       this.animationFrame = requestAnimationFrame(this._animationLoop);
     }
-
-  }
-
-  addContainer(container) {
-    this.container = container;
-    container.controller = this;
-  }
-
-  addRenderer(renderer) {
-    this.renderer = renderer;
-    container.controller = this;
   }
 
   @autobind _animationLoop() {
@@ -1009,6 +1032,16 @@ class Controller {
     if (typeof window !== 'undefined') {
       this.animationFrame = requestAnimationFrame(this._animationLoop);
     }
+  }
+
+  addContainer(container) {
+    this.container = container;
+    container.controller = this;
+  }
+
+  addRenderer(renderer) {
+    this.renderer = renderer;
+    container.controller = this;
   }
 
   update() {
@@ -1028,6 +1061,21 @@ class Controller {
       this.renderer.needsRedraw = false;
     }
   }
+
+  @autobind
+  onWheel(event) {
+    event.stopPropagation();
+    event.preventDefault();
+    let value = event.deltaY;
+
+    this.renderer.cameraManager.moveDefaultCameraToAnchor({
+      distance: value / 10.0
+    });
+
+    this.renderer.needsRedraw = true;
+    console.log("event.deltaY: ", value);
+  }
+
 }
 
 /*
@@ -1043,9 +1091,13 @@ class ExampleApp extends React.Component {
     super(props);
     this.state = {
     };
-    this.renderer = null;
-    this.container = null;
-    this.controller = null;
+    // renderer will be created only after canvas exists
+    this.defaultRenderer = null;
+
+    // controler
+    this.defaultController = new Controller();
+    this.defaultContainer = new Container();
+    this.defaultController.addContainer(this.defaultContainer);
   }
 
   componentWillMount() {
@@ -1059,15 +1111,14 @@ class ExampleApp extends React.Component {
     const glOptions = null;
 
     // Before creating the WebGL renderer, a canvas should be ready
-    this.renderer = new WebGLRenderer();
-    this.renderer._initialize(this.refs.canvas, debug, glOptions);
+    this.defaultRenderer = new WebGLRenderer();
+    this.defaultRenderer._initialize(this.refs.canvas, debug, glOptions);
 
-    // create container
-    this.container = new Container();
+    this.defaultController.addRenderer(this.defaultRenderer);
 
-    this.renderer.newPerspectiveCamera({
-      eye: [1, 2, -3],
-      lookAt: [0.0, 0.0, 0.0],
+    this.defaultRenderer.newPerspectiveCamera({
+      pos: [1, 2, -3],
+      anchor: [0.0, 0.0, 0.0],
       up: [0.0, -1.0, 0.0],
       fovY: 45,
       near: 0.1,
@@ -1075,13 +1126,7 @@ class ExampleApp extends React.Component {
     });
 
 
-    this.controller = new Controller();
-    this.controller.addRenderer(this.renderer);
-    this.controller.addContainer(this.container);
-
-
     // These are all "layers"
-
     // These two are opaque layers
     const axes = new Axes();
     axes.generateGeometry();
@@ -1108,11 +1153,10 @@ class ExampleApp extends React.Component {
     });
     plane.generateGeometry();
 
-    // Add layers in order.
-    // Eventually r
-    this.container.addLayers(axes);
-    this.container.addLayers(scatterplot);
-    this.container.addLayers(plane);
+    // Add layers to default container in order.
+    this.defaultContainer.addLayers(axes);
+    this.defaultContainer.addLayers(scatterplot);
+    this.defaultContainer.addLayers(plane);
   }
 
   componentWillReceiveProps(props) {
@@ -1142,7 +1186,8 @@ class ExampleApp extends React.Component {
         <canvas
           ref = {'canvas'}
           width = {width}
-          height = {height} />
+          height = {height}
+          onWheel = {this.defaultController.onWheel}/>
         <FPSStats isActive/>
       </div>
       );
