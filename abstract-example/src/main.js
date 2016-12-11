@@ -28,7 +28,7 @@ import ReactDOM from 'react-dom';
 import {createStore} from 'redux';
 import {Provider, connect} from 'react-redux';
 
-import {GL, createGLContext, Buffer, Program} from 'luma.gl';
+import {GL, createGLContext, Buffer, Framebuffer, Program} from 'luma.gl';
 import {mat2, mat3, mat4, vec2, vec3, vec4} from 'gl-matrix';
 import autobind from 'autobind-decorator';
 import flattenDeep from 'lodash.flattendeep';
@@ -135,12 +135,14 @@ class WebGLRenderer extends Renderer {
     this.cameraManager = new CameraManager(this);
 //    this.shaderManager = new ShaderManager(this);
 
+    this.framebufferManager = new FramebufferManager(this);
+
     this.needsRedraw = false; // if camera/viewport changed
 
     this.frameNo = 0;
   }
 
-  _initialize(canvas, debug, glOptions) {
+  initialize(canvas, debug, glOptions) {
     console.log("WebGLRenderer._intialize()");
 
     // Context creation
@@ -156,8 +158,7 @@ class WebGLRenderer extends Renderer {
       return;
     }
 
-
-    // Initial state of WebGL
+    // Initial WebGL states
     const gl = this.glContext;
 
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
@@ -170,7 +171,7 @@ class WebGLRenderer extends Renderer {
     console.log("WebGLRenderer._intialize() done");
   }
 
-  newPerspectiveCamera({id = "main", pos, anchor, up, fovY, near, far}) {
+  newPerspectiveCamera({id = "main", pos, anchor, up, fovY, near, far, target = 'default'}) {
     this.cameraManager.newCamera({
       id: id,
       pos: pos,
@@ -180,7 +181,8 @@ class WebGLRenderer extends Renderer {
       aspect: this.currentCanvas.width / this.currentCanvas.height,
       near: near,
       far: far,
-      type: "perspective"
+      type: "perspective",
+      target: target
     })
     this.needsRedraw = true;
   }
@@ -189,7 +191,6 @@ class WebGLRenderer extends Renderer {
   Renderable geometry doesn't need to match abstract geometry but to
   maximize the rendering performance. */
   regenerateRenderableGeometries(container) {
-    console.log("WebGLRenderer.regenerateRenderableGeometries()");
 
     /* When data structure changed, we need to update the rendering geometries.
     Right now, rendering geometries are regenerated from ground up. This should be
@@ -228,8 +229,14 @@ class WebGLRenderer extends Renderer {
   But eventually it will involve significant work in transforming
   abstract mesh to renderable mesh.
 
+  This is the primary place that the user uses GPU compute to
+  accelerate data transformation and mesh generation. If the user
+  choose to do GPU compute here, he can use the existing drawing
+  context and keep the outputs on the GPU.
+
   Note: abstract mesh does not need to be a 1-on-1 match with
   renderable match */
+
   generateRenderableMeshes(mesh) {
     let currentRenderableMesh;
     if (mesh instanceof Triangles) {
@@ -269,12 +276,12 @@ class WebGLRenderer extends Renderer {
       // } else {
       //   gl.clearColor(0.0, 0.0, 0.2, 1.0);
       // }
-      gl.clearColor(0.0, 0.0, 0.2, 1.0);
-      gl.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
-
+      this.renderer.glContext.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
       for (let cameraID = 0; cameraID < this.cameraManager.cameras.length; cameraID++) {
-        let currentCamera = this.cameraManager.cameras[cameraID];
+        // Get current camera and set appropriate framebuffer
+        let currentCamera = this.cameraManager.getCamera(cameraID);
+
         let transformMatrices = currentCamera.getTransformMatrices();
         for (let i = 0; i < this.activeRenderableGeometries.length; i++) {
           let currentRenderableGeometry = this.activeRenderableGeometries[i];
@@ -289,8 +296,11 @@ class WebGLRenderer extends Renderer {
             }
           }
         }
+        //this.framebufferManager.outputContent(currentCameraTarget);
       }
       console.log("Draw completed. Frame No. ", this.frameNo);
+
+
       this.needsRedraw = false;
       this.frameNo++;
     }
@@ -301,20 +311,20 @@ class WebGLRenderer extends Renderer {
 They are very simple right now */
 class BufferManager {
   constructor(renderer) {
-    this._renderer = renderer;
+    this.renderer = renderer;
     this.vertexBuffers = [];
     this.vertexIndexBuffers = [];
   }
 
   newVertexBuffer({data, size, instanced = 0}) {
-    let buffer = new Buffer(this._renderer.glContext);
+    let buffer = new Buffer(this.renderer.glContext);
     buffer.setData({data: data, size: size, target: GL.ARRAY_BUFFER, instanced: instanced});
     this.vertexBuffers.push(buffer);
     return this.vertexBuffers.length - 1;
   }
 
   newVertexIndexBuffer({data}) {
-    let buffer = new Buffer(this._renderer.glContext);
+    let buffer = new Buffer(this.renderer.glContext);
     buffer.setData({data: data, target: GL.ELEMENT_ARRAY_BUFFER});
     this.vertexIndexBuffers.push(buffer);
     return this.vertexIndexBuffers.length - 1;
@@ -329,9 +339,10 @@ class BufferManager {
   }
 }
 
+/*shader management should go here*/
 class ProgramManager {
   constructor(renderer) {
-    this._renderer = renderer;
+    this.renderer = renderer;
     this.programs = [];
 
     this.defaultProgram = null;
@@ -374,18 +385,18 @@ class ProgramManager {
       }
       `;
 
-      // this._vertexShaderID = this._renderer.shaderManager.newShaderFromSource(vsSource, GL.VERTEX_SHADER);
+      // this._vertexShaderID = this.renderer.shaderManager.newShaderFromSource(vsSource, GL.VERTEX_SHADER);
 
-      // this._fragmentShaderID = this._renderer.shaderManager.newShaderFromSource(fsSource, GL.FRAGMENT_SHADER);
+      // this._fragmentShaderID = this.renderer.shaderManager.newShaderFromSource(fsSource, GL.FRAGMENT_SHADER);
 
-      const defaultProgram = new Program(this._renderer.glContext, {
+      const defaultProgram = new Program(this.renderer.glContext, {
         vs: vsSource,
         fs: fsSource
       });
       this.programs.push(defaultProgram);
     }
 
-    const program = new Program(this._renderer.glContext, {
+    const program = new Program(this.renderer.glContext, {
       vs: vsSource,
       fs: fsSource
     });
@@ -403,32 +414,78 @@ class ProgramManager {
   }
 }
 
-// This is not being used right now. luma.gl didn't expose the Shader class
-class ShaderManager {
+// // This is not being used right now. luma.gl didn't expose the Shader class
+// class ShaderManager {
+//   constructor(renderer) {
+//     this.renderer = renderer;
+//     this.shaders = [];
+//   }
+
+//   newShaderFromSource(source, type) {
+//     const shader = new Shader(this.renderer.glContext, source, type);
+//     this.shaders.push(shader);
+//     return this.shaders.length - 1;
+//   }
+// }
+
+class FramebufferManager {
   constructor(renderer) {
-    this._renderer = renderer;
-    this.shaders = [];
+    this.renderer = renderer;
+    this.framebuffers = [];
   }
 
-  newShaderFromSource(source, type) {
-    const shader = new Shader(this._renderer.glContext, source, type);
-    this.shaders.push(shader);
-    return this.shaders.length - 1;
+  newFramebuffer({width, height}) {
+    let framebuffer = new Framebuffer(this.renderer.glContext);
+    framebuffer.resize({
+      width: 16,
+      height: 16
+    })
+    this.framebuffers.push(framebuffer);
+    return this.framebuffers.length - 1;
   }
+
+  bindFramebuffer(ID) {
+    if (ID === -1) {
+      this.renderer.glContext.bindFramebuffer(this.renderer.glContext.FRAMEBUFFER, null);
+    } else {
+      this.framebuffers[ID].bind();
+    }
+    this.renderer.glContext.clearColor(0.0, 0.0, 0.2, 1.0);
+    this.renderer.glContext.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
+  }
+
+  // outputContent(ID) {
+  //   if (ID === -1) {
+  //     this.renderer.glContext.bindFramebuffer(this.renderer.glContext.FRAMEBUFFER, null);
+  //   } else {
+  //     this.framebuffers[ID].bind();
+  //   }
+  //   var data = new Uint8Array(16 * 16 * 4);
+  //   this.renderer.glContext.readPixels(0, 0, 16, 16, this.renderer.glContext.RGBA, this.renderer.glContext.UNSIGNED_BYTE, data);
+  //   console.log("framebuffer content: ", data);
+  // }
+
 }
 
 class TextureManager {
-  constructor() {
+  constructor(renderer) {
+    this.renderer = renderer;
+    this.textures = [];
   }
 }
 
-// All camera operations
+/* Camera management
+From renderer's point of view, a camera is just a set of
+transformation matrices and a render target that receives
+most of interactive commands from the user */
 class CameraManager {
-  constructor() {
+  constructor(renderer) {
+    this.renderer = renderer;
     this.cameras = [];
+    this.cameraTargets = [];
   }
 
-  newCamera({id, pos, anchor, up, fovY, aspect, near, far, type}) {
+  newCamera({id, pos, anchor, up, fovY, aspect, near, far, type, target}) {
     let camera = new Camera({
       id: id,
       pos: pos,
@@ -438,17 +495,31 @@ class CameraManager {
       aspect: aspect,
       near: near,
       far: far,
-      type: "perspective"
+      type: "perspective",
     });
 
     this.cameras.push(camera);
+
+    if (target === "default") {
+      this.cameraTargets.push(-1); // using a special sentinel value for default framebuffer target
+    } else if (target === "texture") {
+      this.cameraTargets.push(this.renderer.framebufferManager.newFramebuffer({
+        width: 1024,
+        height: 1024
+      }));
+    }
   }
 
+  getCamera(ID) {
+    this.renderer.framebufferManager.bindFramebuffer(this.cameraTargets[cameraID]);
+    return this.cameras[ID];
+  }
   moveDefaultCameraToAnchor({distance}) {
     this.cameras[0].moveToAnchor({
       distance: distance
     });
   }
+
 }
 
 /* This is here to match the Geometry class.
@@ -472,14 +543,14 @@ class RenderableGroup {
   }
 }
 
-/* The base class of RenderableMesh
-
+/* The base class, RenderableMesh
+This is
 */
 class RenderableMesh {
   constructor({mesh, renderer}) {
     console.log("WebGLRenderable.constructor()");
     // These can be initialized in the super class because they are required for all Mesh objects
-    this._renderer = renderer;
+    this.renderer = renderer;
 
     // It has a reference to the abstract mesh. Remember, abstract mesh
     // may or may not be the same as the renderable mesh
@@ -495,20 +566,23 @@ class RenderableMesh {
     // Mesh space stuff, such as rotation, scaling probably will happen here
     this._modelMatrix = mesh.modelMatrix;
 
+    // default program
+    this._programID = this.renderer.programManager.getDefaultProgramID();
+
     // All renderable mesh need to have vertice position, texture coords, vertex color and vertex indices
-    this._vertexBufferIDs.push(this._renderer.bufferManager.newVertexBuffer({
+    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: mesh.vertices,
       size: 3
     }));
-    this._vertexBufferIDs.push(this._renderer.bufferManager.newVertexBuffer({
+    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: mesh.texCoords,
       size: 2
     }));
-    this._vertexBufferIDs.push(this._renderer.bufferManager.newVertexBuffer({
+    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: mesh.color,
       size: 4
     }));
-    this._vertexIndexBufferID = this._renderer.bufferManager.newVertexIndexBuffer({
+    this._vertexIndexBufferID = this.renderer.bufferManager.newVertexIndexBuffer({
       data: mesh.vertexIndices
     });
 
@@ -517,15 +591,15 @@ class RenderableMesh {
 
   // Convenient function for communicating with resource managers
   getVertexBufferByID(id) {
-    return this._renderer.bufferManager.getVertexBuffer(id);
+    return this.renderer.bufferManager.getVertexBuffer(id);
   }
 
   getVertexIndexBufferByID(id) {
-    return this._renderer.bufferManager.getVertexIndexBuffer(id);
+    return this.renderer.bufferManager.getVertexIndexBuffer(id);
   }
 
   getProgramByID(id) {
-    return this._renderer.programManager.getProgram(id);
+    return this.renderer.programManager.getProgram(id);
   }
 
   render(transformMatrices) {
@@ -554,19 +628,12 @@ class RenderableMesh {
 class WebGLTriangles extends RenderableMesh {
   constructor({triangles, renderer}) {
     super({mesh: triangles, renderer: renderer});
-
-    console.log("WebGLTriangles.constructor()");
-
     this._numberOfPrimitives = triangles.vertexIndices.length / 3;
-    this._programID = this._renderer.programManager.getDefaultProgramID();
-
-    console.log("WebGLTriangles constructor done");
   }
 
   render(transformMatrices) {
     super.render(transformMatrices);
-
-    this._renderer.glContext.drawElements(GL.TRIANGLES, this._numberOfPrimitives * 3, this._renderer.glContext.UNSIGNED_SHORT, 0);
+    this.renderer.glContext.drawElements(GL.TRIANGLES, this._numberOfPrimitives * 3, this.renderer.glContext.UNSIGNED_SHORT, 0);
   }
 }
 
@@ -574,19 +641,12 @@ class WebGLTriangles extends RenderableMesh {
 class WebGLLine extends RenderableMesh {
   constructor({line, renderer}) {
     super({mesh: line, renderer: renderer});
-
-    console.log("WebGLLine.constructor()");
-
     this._numberOfPrimitives = line.vertexIndices.length / 2;
-    this._programID = this._renderer.programManager.getDefaultProgramID();
-
-    console.log("WebGLLine constructor done");
   }
 
   render(transformMatrices) {
     super.render(transformMatrices);
-
-    this._renderer.glContext.drawElements(GL.LINES, this._numberOfPrimitives * 2, this._renderer.glContext.UNSIGNED_SHORT, 0);
+    this.renderer.glContext.drawElements(GL.LINES, this._numberOfPrimitives * 2, this.renderer.glContext.UNSIGNED_SHORT, 0);
   }
 }
 
@@ -594,24 +654,22 @@ class WebGLInstancedTriangles extends RenderableMesh {
   constructor({instancedTriangles, renderer}) {
     super({mesh: instancedTriangles, renderer: renderer});
 
-    console.log("WebGLInstancedTriangles.constructor()");
-
     this._numberOfPrimitives = instancedTriangles.vertexIndices.length / 3;
 
     // Additional properties and attributes required for instanced drawing
     this._numberOfInstances = instancedTriangles.instancedPosition.length / 3;
 
-    this._vertexBufferIDs.push(this._renderer.bufferManager.newVertexBuffer({
+    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: instancedTriangles.instancedPosition,
       size: 3,
       instanced: 1
     }));
-    this._vertexBufferIDs.push(this._renderer.bufferManager.newVertexBuffer({
+    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: instancedTriangles.instancedColor,
       size: 4,
       instanced: 1
     }));
-    this._vertexBufferIDs.push(this._renderer.bufferManager.newVertexBuffer({
+    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: instancedTriangles.instancedRadius,
       size: 1,
       instanced: 1
@@ -656,12 +714,10 @@ class WebGLInstancedTriangles extends RenderableMesh {
     }
     `;
 
-    this._programID = this._renderer.programManager.newProgramFromShaders({
+    this._programID = this.renderer.programManager.newProgramFromShaders({
       vsSource: vsSource,
       fsSource: fsSource
     });
-
-    console.log("WebGLInstancedTriangles.constructor() done");
   }
 
   render(transformMatrices) {
@@ -677,10 +733,10 @@ class WebGLInstancedTriangles extends RenderableMesh {
         instancedRadius: this.getVertexBufferByID(this._vertexBufferIDs[5])
     });
 
-    const extension = this._renderer.glContext.getExtension('ANGLE_instanced_arrays');
+    const extension = this.renderer.glContext.getExtension('ANGLE_instanced_arrays');
 
     extension.drawElementsInstancedANGLE(
-      GL.TRIANGLES, this._numberOfPrimitives * 3, this._renderer.glContext.UNSIGNED_SHORT, 0, this._numberOfInstances
+      GL.TRIANGLES, this._numberOfPrimitives * 3, this.renderer.glContext.UNSIGNED_SHORT, 0, this._numberOfInstances
       );
   }
 }
@@ -702,26 +758,45 @@ class Container {
     /* It definitely can have multiple layers. We are expecting the
      whole framework to function properly with hundreds of layers */
     this.layers = [];
-
     this.layerOrder = [];
 
     // state variables
     this.dataChanged = false; // if data content changed
     this.dataStructureChanged = false; // if data structure changed
+
+    // compute canvas and compute webgl context
+    this.computeCanvas = null;
+    this.computeContext = null;
+  }
+
+  initialize(canvas) {
+    this.computeCanvas = canvas;
+    let glOptions = null;
+    // Context creation
+    try {
+      this.computeContext = createGLContext({
+        canvas: canvas,
+        debug: false,
+        ...glOptions
+      });
+      console.log("WebGL compute context successfully created: ", this.computeContext);
+    } catch (error) {
+      console.log("Compute context creation failed");
+      console.log("error: ", error);
+      return;
+    }
+    this.computeContext.viewport(0, 0, 1, 1);
   }
 
   addLayers(layer) {
+    if (this.computeContext !== null) {
+      layer.computeContext = this.computeContext;
+    }
     this.layers.push(layer);
     this.layerOrder.push(this.layers.length - 1);
-
     this.dataChanged = true;
     this.dataStructureChanged = true;
   }
-
-  // attachRenderer(renderer) {
-  //   this.renderers.push(renderer);
-  //   renderer.setActiveContainer(this);
-  // }
 }
 
 /* Layers are data containers.
@@ -738,6 +813,10 @@ class Layer {
     Abstract meshes are generated and stored together to form a group
     */
     this.geometry = new Geometry();
+    /* */
+    this.computeContext = null;
+
+    this.useGPUCompute = false;
   }
 
   generateGeometry() {
@@ -830,6 +909,46 @@ class Scatterplot3D extends Layer {
   }
 }
 
+class L2NormScatterplot extends Layer {
+  constructor({data, color, size}) {
+    super();
+    this.data = data;
+    this.geometry.color = color;
+    this.geometry.size = size;
+  }
+
+  generateGeometry() {
+    const defaultGroup = new Group();
+    this.geometry.groups.push(defaultGroup);
+
+    this.geometry.data = this.calculateNorm(this.data);
+
+    /* We didn't some data processing here. (even though
+    it's pretty straight-forward flatten operation) */
+    let instancedSpheres = new InstancedSpheres({
+      instancedPosition: flattenDeep(this.geometry.data),
+      instancedColor: flattenDeep(this.geometry.color),
+      instancedRadius: flattenDeep(this.geometry.size.map(a => a * 0.3))
+    })
+
+    defaultGroup.meshes.push(instancedSpheres);
+  }
+
+  calculateNorm(data) {
+    let retData = [];
+    if (this.computeContext !== null && this.useGPUCompute === true) { // GPU data processing
+
+    } else { // CPU data processing
+      for (let i = 0; i < data.length; i++) {
+        let distance = Math.sqrt(data[i][0] * data[i][0] + data[i][1] * data[i][1] + data[i][1] * data[i][1]);
+        retData.push(distance);
+        retData.push(distance);
+        retData.push(-distance);
+      }
+    }
+    return retData;
+  }
+}
 
 /* data in representable form */
 class Geometry {
@@ -1073,7 +1192,6 @@ class Controller {
     });
 
     this.renderer.needsRedraw = true;
-    console.log("event.deltaY: ", value);
   }
 
 }
@@ -1081,7 +1199,8 @@ class Controller {
 /*
 Example App
 
-Example app should manipulate container, camera and renderer only.
+Example app is the main React component that our framework output
+It should manipulate container, camera and renderer only.
 We should specify APIs for these classes.
 
 We also need to speficy APIs for generating and manipulating Layers.
@@ -1096,8 +1215,6 @@ class ExampleApp extends React.Component {
 
     // controler
     this.defaultController = new Controller();
-    this.defaultContainer = new Container();
-    this.defaultController.addContainer(this.defaultContainer);
   }
 
   componentWillMount() {
@@ -1112,9 +1229,12 @@ class ExampleApp extends React.Component {
 
     // Before creating the WebGL renderer, a canvas should be ready
     this.defaultRenderer = new WebGLRenderer();
-    this.defaultRenderer._initialize(this.refs.canvas, debug, glOptions);
-
+    this.defaultRenderer.initialize(this.refs.draw, debug, glOptions);
     this.defaultController.addRenderer(this.defaultRenderer);
+
+    this.defaultContainer = new Container();
+    this.defaultContainer.initialize(this.refs.compute);
+    this.defaultController.addContainer(this.defaultContainer);
 
     this.defaultRenderer.newPerspectiveCamera({
       pos: [1, 2, -3],
@@ -1125,11 +1245,20 @@ class ExampleApp extends React.Component {
       far: 100.0
     });
 
+    // this.defaultRenderer.newPerspectiveCamera({
+    //   pos: [3, 1, -6],
+    //   anchor: [0.0, 0.0, 0.0],
+    //   up: [0.0, -1.0, 0.0],
+    //   fovY: 45,
+    //   near: 0.1,
+    //   far: 100.0,
+    //   target: "texture"
+    // });
 
     // These are all "layers"
     // These two are opaque layers
     const axes = new Axes();
-    axes.generateGeometry();
+    this.defaultContainer.addLayers(axes);
 
     let scatterplotData = [];
     let scatterplotColor = [];
@@ -1145,18 +1274,37 @@ class ExampleApp extends React.Component {
       color: scatterplotColor,
       size: scatterplotSize,
     })
-    scatterplot.generateGeometry();
+    this.defaultContainer.addLayers(scatterplot);
+
+
+    let oneColor = new Array(400);
+    for (let i = 0; i < 100; i++) {
+      oneColor[i * 4 + 0] = 0.3;
+      oneColor[i * 4 + 1] = 0.3;
+      oneColor[i * 4 + 2] = 0.3;
+      oneColor[i * 4 + 3] = 1.0;
+    }
+    const norm = new L2NormScatterplot({
+      data: scatterplotData,
+      color: oneColor,
+      size: scatterplotSize,
+    })
+    this.defaultContainer.addLayers(norm);
 
     // This is a transparent layer.
     const plane = new Plane({
       data: [1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, -1.0, 0.0, -1.0, -1.0, 0.0]
     });
+    this.defaultContainer.addLayers(plane);
+
+    /* We could let render() function to call generateGeometry() but I
+    feel it's beneficial to have a way of calling generateGeometry() manually
+    */
+    axes.generateGeometry();
+    scatterplot.generateGeometry();
+    norm.generateGeometry();
     plane.generateGeometry();
 
-    // Add layers to default container in order.
-    this.defaultContainer.addLayers(axes);
-    this.defaultContainer.addLayers(scatterplot);
-    this.defaultContainer.addLayers(plane);
   }
 
   componentWillReceiveProps(props) {
@@ -1184,10 +1332,14 @@ class ExampleApp extends React.Component {
       <div>
         <div ref="fps" className="fps" />
         <canvas
-          ref = {'canvas'}
+          ref = {'draw'}
           width = {width}
           height = {height}
           onWheel = {this.defaultController.onWheel}/>
+        <canvas
+          ref = {'compute'}
+          width = {1}
+          height = {1}/>
         <FPSStats isActive/>
       </div>
       );
