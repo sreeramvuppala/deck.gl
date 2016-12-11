@@ -28,7 +28,7 @@ import ReactDOM from 'react-dom';
 import {createStore} from 'redux';
 import {Provider, connect} from 'react-redux';
 
-import {GL, createGLContext, Buffer, Shader, Program} from 'luma.gl';
+import {GL, createGLContext, Buffer, Program} from 'luma.gl';
 import {mat2, mat4, vec2, vec4} from 'gl-matrix';
 import autobind from 'autobind-decorator';
 import flattenDeep from 'lodash.flattendeep';
@@ -67,17 +67,18 @@ function preprocessData(rawData) {
 }
 
 
+////
 /* Renderer classes
 Renderers are responsible for data presentation. It knows how to generate renderable
-data structures from abstract data. It handles all internal states of a rendering
-engine, such as WebGL. It also manages resources such as buffers, textures and programs
-to maximize reuse. All rendering optimization (sorting/clipping etc...) happens here
+data. It handles all internal states of a rendering engine, such as WebGL.
+It also manages resources such as buffers, textures and programs
+to maximize resource reuse. It handles rendering pipeline configuration too.
+All rendering optimization (sorting/clipping etc...) happens here.
 */
 
 // Base class
 class Renderer {
   constructor() {
-
   }
 }
 
@@ -87,26 +88,49 @@ class HeadlessWebGLRenderer extends Renderer {
     super();
   }
 }
-
 class WebGL2Renderer extends Renderer {
   constructor() {
     super();
   }
 }
+class SoftwareCanvasRenderer extends Renderer {
+  constructor() {
+    super();
+  }
+}
 
+// On screen WebGL renderer
 class WebGLRenderer extends Renderer {
   constructor() {
     super();
+    // An on-screen WebGL renderer needs a canvas
     this.currentCanvas = null;
-    this.currentRendererContext = null;
-    this.debugContext = false;
+    // Current WebGL context
+    this.glContext = null;
+    this.debug = false;
+
+    // Render function controller
     this.activated = true;
+    // Active container to be rendered
     this.activeContainer = null;
-    this.activeRenderingGeometries = []; // These are an array that holds processed geometries ready for rendering. It should mimic the geometries array in activeContainer but should be optimized for rendering performance.
+
+    // These are an array that holds processed geometries ready for rendering. It's build partly according to the geometries array in the activeContainer but should be optimized for rendering performance.
+    this.activeRenderableGeometries = [];
+
+    // These are rendering resource managers.
     this.bufferManager = new BufferManager(this);
     this.textureManager = new TextureManager(this);
     this.programManager = new ProgramManager(this);
-    this.shaderManager = new ShaderManager(this);
+
+    /* We should have a camera manager here to handle all abstract camera from the container class.
+    More importantly, we should have auxillary cameras for rendering advanced effects like shadows.
+    It's not implemented yet. Right now, the renderer just take abstract camera from the container class.
+    */
+
+    this.cameraManager = new CameraManager(this);
+//    this.shaderManager = new ShaderManager(this);
+
+    this.needsRedraw = false; // if camera/viewport changed
 
     this.frameNo = 0;
   }
@@ -114,23 +138,26 @@ class WebGLRenderer extends Renderer {
   _initialize(canvas, debug, glOptions) {
     console.log("WebGLRenderer._intialize()");
 
+    // Context creation
     this.currentCanvas = canvas;
-    this.debugContext = debug;
+    this.debug = debug;
     this.contextOptions = glOptions;
     try {
-      this.currentRendererContext = createGLContext({canvas, debug, ...glOptions});
-      console.log("WebGL context successfully created: ", this.currentRendererContext);
+      this.glContext = createGLContext({canvas, debug, ...glOptions});
+      console.log("WebGL context successfully created: ", this.glContext);
     } catch (error) {
       console.log("Context creation failed");
       console.log("error: ", error);
       return;
     }
 
+    // Initial set up of the animation loop
     if (typeof window !== 'undefined') {
       this.animationFrame = requestAnimationFrame(this._animationLoop);
     }
 
-    const gl = this.currentRendererContext;
+    // Initial state of WebGL
+    const gl = this.glContext;
 
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
     gl.enable(gl.DEPTH_TEST);
@@ -141,6 +168,7 @@ class WebGLRenderer extends Renderer {
 
     console.log("WebGLRenderer._intialize() done");
   }
+
   @autobind _animationLoop() {
     // console.log("WebGLRenderer._animationLoop() fired");
 
@@ -156,70 +184,51 @@ class WebGLRenderer extends Renderer {
     this.activeContainer = container;
   }
 
-  generateTrianglesFromTriangles(triangles) {
-    return new WebGLTriangles({
-      triangles: triangles,
-      renderer: this
-    });
-  }
-
-  generateLineFromLine(line) {
-    return new WebGLLine({
-      line: line,
-      renderer: this
-    });
-  }
-
-  generateInstancedTrianglesFromInstancedSpheres(instancedSpheres) {
-    return new WebGLInstancedTriangles({
-      instancedTriangles: instancedSpheres,
-      renderer: this
+  newPerspectiveCamera({id = "main", eye, lookAt, up, fovY, near, far}) {
+    this.cameraManager.newCamera({
+      id: id,
+      eye: eye,
+      lookAt: lookAt,
+      up: up,
+      fovY: fovY,
+      aspect: this.currentCanvas.width / this.currentCanvas.height,
+      near: near,
+      far: far,
+      type: "perspective"
     })
-
+    this.needsRedraw = true;
   }
 
-  // This will be a major place
+  /* Generating renderable geometry from abstract geometry.
+  Renderable geometry doesn't need to match abstract geometry but to
+  maximize the rendering performance. */
   processContainers() {
     console.log("WebGLRenderer.processContainers()");
 
     let container = this.activeContainer;
 
-    // When data structure changed, we need to update the rendering geometries.
-    // Right now, rendering geometries are regenerated from ground up. This should be
-    // optimized to regenerating only the change part of the whole scene tree
+    /* When data structure changed, we need to update the rendering geometries.
+    Right now, rendering geometries are regenerated from ground up. This should be
+    optimized to regenerating only the change part of the whole scene tree.
+    Major optimization could happen here */
     if (container.dataStructureChanged === true) {
-      this.activeRenderingGeometries = [];
-      let activeRenderingGeometries = this.activeRenderingGeometries;
+      this.activeRenderableGeometries = [];
+      let activeRenderableGeometries = this.activeRenderableGeometries;
 
       for (let i = 0; i < container.layers.length; i++) {
         let currentGeometry = container.layers[container.layerOrder[i]].geometry;
-        let currentRenderingGeometry = new RenderingGeometry();
+        let currentRenderableGeometry = new RenderableGeometry();
 
-        activeRenderingGeometries.push(currentRenderingGeometry);
+        activeRenderableGeometries.push(currentRenderableGeometry);
 
         for (let j = 0; j < currentGeometry.groups.length; j++) {
-          let currentRenderingGroup = new RenderingGroup();
-          currentRenderingGeometry.groups.push(currentRenderingGroup);
+          let currentRenderableGroup = new RenderableGroup();
+          currentRenderableGeometry.groups.push(currentRenderableGroup);
 
           let currentGroup = currentGeometry.groups[j];
 
           for (let k = 0; k < currentGroup.meshes.length; k++) {
-            let currentRenderingMesh;
-
-            let currentMesh = currentGroup.meshes[k];
-
-            let processFunction;
-
-            if (currentMesh instanceof Triangles) {
-              currentRenderingMesh = this.generateTrianglesFromTriangles(currentMesh)
-            } else if (currentMesh instanceof Line) {
-              currentRenderingMesh = this.generateLineFromLine(currentMesh)
-            } else if (currentMesh instanceof InstancedSpheres) {
-              currentRenderingMesh = this.generateInstancedTrianglesFromInstancedSpheres(currentMesh)
-            } else {
-              console.log("unknown type of primitive!")
-            }
-            currentRenderingGroup.meshes.push(currentRenderingMesh);
+            currentRenderableGroup.meshes.push(this.generateRenderableMeshes(currentGroup.meshes[k]));
           }
         }
       }
@@ -230,10 +239,46 @@ class WebGLRenderer extends Renderer {
     }
   }
 
+  /* Generate renderable mesh from abstract mesh.
+  Basically a switch statment right now.
+  Most of the work are delegated to each RenderableMesh's constructor
+  But eventually it will involve significant work in transforming
+  abstract mesh to renderable mesh.
+
+  Note: abstract mesh does not need to be a 1-on-1 match with
+  renderable match */
+  generateRenderableMeshes(mesh) {
+    let currentRenderableMesh;
+    if (mesh instanceof Triangles) {
+      currentRenderableMesh = new WebGLTriangles({
+        triangles: mesh,
+        renderer: this
+      });
+    } else if (mesh instanceof Line) {
+      currentRenderableMesh = new WebGLLine({
+        line: mesh,
+        renderer: this
+      });
+    } else if (mesh instanceof InstancedSpheres) {
+      currentRenderableMesh = new WebGLInstancedTriangles({
+        instancedTriangles: mesh,
+        renderer: this
+      });
+    } else {
+      console.log("WebGLRenderer.generateRenderableMeshes(). Unknown type of mesh!")
+    }
+    return currentRenderableMesh;
+  }
+
+  /* Rendering function
+  Since most of the work has been done elsewhere. This function should be
+  kept very simple. Just iterate through all renderable meshes and call their
+  render function
+  */
   render() {
     const container = this.activeContainer;
-    const gl = this.currentRendererContext;
-    if (container.needsRedraw) {
+    const gl = this.glContext;
+    if (this.needsRedraw) {
       // if (this.frameNo % 3 === 0)
       // {
       //   gl.clearColor(0.2, 0.0, 0.0, 1.0);
@@ -247,30 +292,33 @@ class WebGLRenderer extends Renderer {
 
       this.processContainers();
 
-      for (let cameraID = 0; cameraID < container.cameras.length; cameraID++) {
-        let currentCamera = container.cameras[cameraID];
+      for (let cameraID = 0; cameraID < this.cameraManager.cameras.length; cameraID++) {
+        let currentCamera = this.cameraManager.cameras[cameraID];
         let transformMatrices = currentCamera.getTransformMatrices();
-        for (let i = 0; i < this.activeRenderingGeometries.length; i++) {
-          let currentRenderingGeometry = this.activeRenderingGeometries[i];
+        for (let i = 0; i < this.activeRenderableGeometries.length; i++) {
+          let currentRenderableGeometry = this.activeRenderableGeometries[i];
 
-          for (let j = 0; j < currentRenderingGeometry.groups.length; j++) {
-            let currentRenderingGroup = currentRenderingGeometry.groups[j];
+          for (let j = 0; j < currentRenderableGeometry.groups.length; j++) {
+            let currentRenderableGroup = currentRenderableGeometry.groups[j];
 
-            for (let k = 0; k < currentRenderingGroup.meshes.length; k++) {
-              let currentRenderingMesh = currentRenderingGroup.meshes[k];
+            for (let k = 0; k < currentRenderableGroup.meshes.length; k++) {
+              let currentRenderableMesh = currentRenderableGroup.meshes[k];
 
-              currentRenderingMesh.render(transformMatrices);
+              currentRenderableMesh.render(transformMatrices);
             }
           }
         }
       }
-      console.log("frameNo: ", this.frameNo);
-      container.needsRedraw = false;
+      console.log("Draw completed. Frame No. ", this.frameNo);
+      this.needsRedraw = false;
       this.frameNo++;
     }
   }
 }
 
+////
+/* Resource manager classes
+They are very simple right now */
 class BufferManager {
   constructor(renderer) {
     this._renderer = renderer;
@@ -279,14 +327,14 @@ class BufferManager {
   }
 
   newVertexBuffer({data, size, instanced = 0}) {
-    let buffer = new Buffer(this._renderer.currentRendererContext);
+    let buffer = new Buffer(this._renderer.glContext);
     buffer.setData({data: data, size: size, target: GL.ARRAY_BUFFER, instanced: instanced});
     this.vertexBuffers.push(buffer);
     return this.vertexBuffers.length - 1;
   }
 
   newVertexIndexBuffer({data}) {
-    let buffer = new Buffer(this._renderer.currentRendererContext);
+    let buffer = new Buffer(this._renderer.glContext);
     buffer.setData({data: data, target: GL.ELEMENT_ARRAY_BUFFER});
     this.vertexIndexBuffers.push(buffer);
     return this.vertexIndexBuffers.length - 1;
@@ -298,14 +346,6 @@ class BufferManager {
 
   getVertexIndexBuffer(index) {
     return this.vertexIndexBuffers[index];
-  }
-
-}
-
-class VertexAttributeManager {
-  constructor(renderer) {
-    this._renderer = renderer;
-
   }
 }
 
@@ -358,14 +398,14 @@ class ProgramManager {
 
       // this._fragmentShaderID = this._renderer.shaderManager.newShaderFromSource(fsSource, GL.FRAGMENT_SHADER);
 
-      const defaultProgram = new Program(this._renderer.currentRendererContext, {
+      const defaultProgram = new Program(this._renderer.glContext, {
         vs: vsSource,
         fs: fsSource
       });
       this.programs.push(defaultProgram);
     }
 
-    const program = new Program(this._renderer.currentRendererContext, {
+    const program = new Program(this._renderer.glContext, {
       vs: vsSource,
       fs: fsSource
     });
@@ -383,6 +423,7 @@ class ProgramManager {
   }
 }
 
+// This is not being used right now. luma.gl didn't expose the Shader class
 class ShaderManager {
   constructor(renderer) {
     this._renderer = renderer;
@@ -390,7 +431,7 @@ class ShaderManager {
   }
 
   newShaderFromSource(source, type) {
-    const shader = new Shader(this._renderer.currentRendererContext, source, type);
+    const shader = new Shader(this._renderer.glContext, source, type);
     this.shaders.push(shader);
     return this.shaders.length - 1;
   }
@@ -401,31 +442,74 @@ class TextureManager {
   }
 }
 
+// All camera operations
+class CameraManager {
+  constructor() {
+    this.cameras = [];
+  }
 
-class RenderingGeometry {
+  newCamera({id, eye, lookAt, up, fovY, aspect, near, far, type}) {
+    let camera = new Camera({
+      id: id,
+      eye: eye,
+      lookAt: lookAt,
+      up: up,
+      fovY: fovY,
+      aspect: aspect,
+      near: near,
+      far: far,
+      type: "perspective"
+    });
+
+    this.cameras.push(camera);
+  }
+}
+
+/* This is here to match the Geometry class.
+  It holds the renderable model of a layer
+*/
+class RenderableGeometry {
   constructor() {
     this.groups = [];
   }
 }
 
-class RenderingGroup {
+/* This is here to match the Group class
+  Renderable group is here to merely add another
+  layer of optimizability. It is designed that meshes within
+  the same renderable group can be reordered without affecting
+  the visual effect
+*/
+class RenderableGroup {
   constructor() {
     this.meshes = [];
   }
 }
 
-class RenderingMesh {
+/* The base class of RenderableMesh
+
+*/
+class RenderableMesh {
   constructor({mesh, renderer}) {
     console.log("WebGLRenderable.constructor()");
-    this._modelMatrix = null;
+    // These can be initialized in the super class because they are required for all Mesh objects
     this._renderer = renderer;
+
+    // It has a reference to the abstract mesh. Remember, abstract mesh
+    // may or may not be the same as the renderable mesh
+    this.mesh = mesh;
+
+    // We store IDs here because our buffer management is centralized.
     this._vertexBufferIDs = [];
+
+    // Number of primitives depends on what kind of primitive this mesh holds
     this._numberOfPrimitives = 0;
 
-
-    this.mesh = mesh;
-    // These can be initialized in the super class because they are required for all Mesh objects
+    // Model matrix for moving the mesh easier
+    // Mesh space stuff, such as rotation, scaling probably will happen here
     this._modelMatrix = mesh.modelMatrix;
+
+    // All renderable mesh need to have vertice position, texture coords, vertex color and vertex indices
     this._vertexBufferIDs.push(this._renderer.bufferManager.newVertexBuffer({
       data: mesh.vertices,
       size: 3
@@ -444,6 +528,8 @@ class RenderingMesh {
 
     console.log("WebGLRenderable.constructor() done");
   }
+
+  // Convenient function for communicating with resource managers
   getVertexBufferByID(id) {
     return this._renderer.bufferManager.getVertexBuffer(id);
   }
@@ -452,18 +538,34 @@ class RenderingMesh {
     return this._renderer.bufferManager.getVertexIndexBuffer(id);
   }
 
-
   getProgramByID(id) {
     return this._renderer.programManager.getProgram(id);
   }
 
   render(transformMatrices) {
-    console.log("ERROR! WebGLRenderable.render() shouldn't be called");
+    // These are default attributes and uniforms
+    // We can add more default stuff here
+    this.getProgramByID(this._programID).use();
+
+    this.getProgramByID(this._programID).setBuffers({
+      position: this.getVertexBufferByID(this._vertexBufferIDs[0]),
+      texCoords: this.getVertexBufferByID(this._vertexBufferIDs[1]),
+      color: this.getVertexBufferByID(this._vertexBufferIDs[2]),
+      index: this.getVertexIndexBufferByID(this._vertexIndexBufferID)
+      });
+
+    this.getProgramByID(this._programID).setUniforms({
+        modelMatrix: this._modelMatrix
+      })
+
+    this.getProgramByID(this._programID).setUniforms({
+      viewProjectionMatrix: transformMatrices.viewProjectionMatrix
+    })
   }
 }
 
-// Primitives that knows how to render itself
-class WebGLTriangles extends RenderingMesh {
+// All RenderableMesh objects know how to render itself
+class WebGLTriangles extends RenderableMesh {
   constructor({triangles, renderer}) {
     super({mesh: triangles, renderer: renderer});
 
@@ -476,30 +578,14 @@ class WebGLTriangles extends RenderingMesh {
   }
 
   render(transformMatrices) {
+    super.render(transformMatrices);
 
-    this.getProgramByID(this._programID).use();
-
-    this.getProgramByID(this._programID).setBuffers({
-      position: this.getVertexBufferByID(this._vertexBufferIDs[0]),
-      texCoords: this.getVertexBufferByID(this._vertexBufferIDs[1]),
-      color: this.getVertexBufferByID(this._vertexBufferIDs[2]),
-      index: this.getVertexIndexBufferByID(this._vertexIndexBufferID)
-      });
-
-    this.getProgramByID(this._programID).setUniforms({
-        modelMatrix: this._modelMatrix
-      })
-
-    this.getProgramByID(this._programID).setUniforms({
-      viewProjectionMatrix: transformMatrices.viewProjectionMatrix
-    })
-
-    this._renderer.currentRendererContext.drawElements(GL.TRIANGLES, this._numberOfPrimitives * 3, this._renderer.currentRendererContext.UNSIGNED_SHORT, 0);
+    this._renderer.glContext.drawElements(GL.TRIANGLES, this._numberOfPrimitives * 3, this._renderer.glContext.UNSIGNED_SHORT, 0);
   }
 }
 
 // Geometries that knows how to render itself
-class WebGLLine extends RenderingMesh {
+class WebGLLine extends RenderableMesh {
   constructor({line, renderer}) {
     super({mesh: line, renderer: renderer});
 
@@ -512,34 +598,21 @@ class WebGLLine extends RenderingMesh {
   }
 
   render(transformMatrices) {
+    super.render(transformMatrices);
 
-    this.getProgramByID(this._programID).use();
-
-    this.getProgramByID(this._programID).setBuffers({
-      position: this.getVertexBufferByID(this._vertexBufferIDs[0]),
-      texCoords: this.getVertexBufferByID(this._vertexBufferIDs[1]),
-      color: this.getVertexBufferByID(this._vertexBufferIDs[2]),
-      index: this.getVertexIndexBufferByID(this._vertexIndexBufferID)
-      });
-
-    this.getProgramByID(this._programID).setUniforms({
-        modelMatrix: this._modelMatrix
-      })
-
-    this.getProgramByID(this._programID).setUniforms({
-      viewProjectionMatrix: transformMatrices.viewProjectionMatrix
-    })
-
-    this._renderer.currentRendererContext.drawElements(GL.LINES, this._numberOfPrimitives * 2, this._renderer.currentRendererContext.UNSIGNED_SHORT, 0);
+    this._renderer.glContext.drawElements(GL.LINES, this._numberOfPrimitives * 2, this._renderer.glContext.UNSIGNED_SHORT, 0);
   }
 }
 
-class WebGLInstancedTriangles extends RenderingMesh {
+class WebGLInstancedTriangles extends RenderableMesh {
   constructor({instancedTriangles, renderer}) {
     super({mesh: instancedTriangles, renderer: renderer});
 
     console.log("WebGLInstancedTriangles.constructor()");
+
     this._numberOfPrimitives = instancedTriangles.vertexIndices.length / 3;
+
+    // Additional properties and attributes required for instanced drawing
     this._numberOfInstances = instancedTriangles.instancedPosition.length / 3;
 
     this._vertexBufferIDs.push(this._renderer.bufferManager.newVertexBuffer({
@@ -558,6 +631,7 @@ class WebGLInstancedTriangles extends RenderingMesh {
       instanced: 1
     }));
 
+    // Standard instanced drawing shaders
     const vsSource = `\
     attribute vec3 position;
     attribute vec4 color;
@@ -605,51 +679,47 @@ class WebGLInstancedTriangles extends RenderingMesh {
   }
 
   render(transformMatrices) {
+    super.render(transformMatrices);
 
-    this.getProgramByID(this._programID).use();
-
+    // Additional attributes (instance drawing related)
+    /* because setBuffers are separated into two calls between super class's render()
+    and sub class's render(), luma.gl will complain that some attributes are not supplied
+    in the first setBuffers() call. But the rendering works fine */
     this.getProgramByID(this._programID).setBuffers({
-        position: this.getVertexBufferByID(this._vertexBufferIDs[0]),
-        texCoords: this.getVertexBufferByID(this._vertexBufferIDs[1]),
-        color: this.getVertexBufferByID(this._vertexBufferIDs[2]),
-        index: this.getVertexIndexBufferByID(this._vertexIndexBufferID),
         instancedPosition: this.getVertexBufferByID(this._vertexBufferIDs[3]),
         instancedColor: this.getVertexBufferByID(this._vertexBufferIDs[4]),
         instancedRadius: this.getVertexBufferByID(this._vertexBufferIDs[5])
-      });
+    });
 
-    this.getProgramByID(this._programID).setUniforms({
-        modelMatrix: this._modelMatrix
-      })
-
-    this.getProgramByID(this._programID).setUniforms({
-      viewProjectionMatrix: transformMatrices.viewProjectionMatrix
-    })
-
-    const extension = this._renderer.currentRendererContext.getExtension('ANGLE_instanced_arrays');
+    const extension = this._renderer.glContext.getExtension('ANGLE_instanced_arrays');
 
     extension.drawElementsInstancedANGLE(
-      GL.TRIANGLES, this._numberOfPrimitives * 3, this._renderer.currentRendererContext.UNSIGNED_SHORT, 0, this._numberOfInstances
+      GL.TRIANGLES, this._numberOfPrimitives * 3, this._renderer.glContext.UNSIGNED_SHORT, 0, this._numberOfInstances
       );
   }
 }
 
+////
 /*
-Containers are data holders. They hold abstract data and abstract cameras for presenting the data.
+Containers are data holders. They hold abstract data.
 Data are organized into layers (or a more general name here?)
+TODO: move camera array to renderer. Camera is more for presenting the data
+than the data itself
 */
 
 class Container {
   constructor() {
+    // A container can have multiple renderers
     this.renderers = [];
+    /* It definitely can have multiple layers. We are expecting the
+     whole framework to function properly with hundreds of layers */
     this.layers = [];
-    this.cameras = [];
+
     this.layerOrder = [];
 
     // state variables
     this.dataChanged = false; // if data content changed
     this.dataStructureChanged = false; // if data structure changed
-    this.needsRedraw = false; // if camera/viewport changed
   }
 
   addLayers(layer) {
@@ -660,35 +730,30 @@ class Container {
     this.dataStructureChanged = true;
   }
 
-  addCamera(camera) {
-    this.cameras.push(camera);
-    this.needsRedraw = true; // if camera/viewport changed
-  }
-
   attachRenderer(renderer) {
     this.renderers.push(renderer);
     renderer.setActiveContainer(this);
   }
 }
 
-
-
 /* Layers are data containers.
-  A Layer contains data that stores data in abstract form (maybe high dimensional)
+  A Layer contains "data" property that stores data in an abstract form (maybe high dimensional)
   and a geometry that stores data in representable form (two dimensional or three dimensional,
   at most four with a dimension of time?)
 */
 class Layer {
   constructor() {
+    /* data holds the abstract data (or called unprocessed data) in its original form */
     this.data = null;
+    /* geometry is a tree structure that hold data in a more presentable way
+    There could be significant things going on transforming this.data to this.geometry
+    Abstract meshes are generated and stored together to form a group
+    */
     this.geometry = new Geometry();
-    this.opaque = true;
   }
+
   generateGeometry() {
     console.log("ERROR! Layer.generateGeometry() shouldn't be called");
-  }
-  setOpaque(opaque) {
-    this.opaque = opaque;
   }
 }
 
@@ -697,6 +762,10 @@ class Plane extends Layer {
   constructor({data}) {
     super();
     this.data = data;
+
+    // Color, texture coordinates and vertex indices are representation related
+    // So they are stored in geometry instead of directly under Layer
+
     this.geometry.data = data;
     this.geometry.texCoords = [1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
     this.geometry.color = [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.5, 1.0, 1.0, 0.0, 0.5];
@@ -724,8 +793,6 @@ class Axes extends Layer {
     super();
     this.data = [[-2.0, 0.0, 0.0, 2.0, 0.0, 0.0], [0.0, -2.0, 0.0, 0.0, 2.0, 0.0], [0.0, 0.0, -2.0, 0.0, 0.0, 2.0]];
 
-    // Color, texture coordinates and vertex indices are representation related
-    // So they are stored in geometry instead of directly under Layer
     this.geometry.data = this.data;
     this.geometry.texCoords = [[1.0, 1.0, 1.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
     this.geometry.color = [[1.0, 0.5, 0.0, 1.0, 1.0, 0.0, 0.5, 1.0], [0.0, 0.5, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0], [0.5, 1.0, 0.0, 1.0, 0.0, 1.0, 0.5, 1.0]];
@@ -763,6 +830,8 @@ class Scatterplot3D extends Layer {
     const defaultGroup = new Group();
     this.geometry.groups.push(defaultGroup);
 
+    /* We didn't some data processing here. (even though
+    it's pretty straight-forward flatten operation) */
     let instancedSpheres = new InstancedSpheres({
       instancedPosition: flattenDeep(this.geometry.data),
       instancedColor: flattenDeep(this.geometry.color),
@@ -771,13 +840,6 @@ class Scatterplot3D extends Layer {
 
     defaultGroup.meshes.push(instancedSpheres);
   }
-
-  // createRandomTestData() {
-  //   const numOfPoints = 10000;
-  //   this.data = new Float32Array(numPoints);
-  //   this.data.map(a => Math.random());
-  //   console.log("Generating random data: ", this.data);
-  // }
 }
 
 
@@ -819,6 +881,7 @@ class Mesh {
     this.id = null;
   }
 }
+
 
 class Triangles extends Mesh {
   constructor({vertices, texCoords, color, vertexIndices, id}) {
@@ -908,7 +971,9 @@ class TranformMatrices {
 }
 
 /*
-Camera can be perspective or orthogonal
+Camera can be perspective or orthogonal.
+Camera is renderer specific. Camera object should
+also indicating what target it wish to draw on
 */
 class Camera {
   constructor({eye, lookAt, up, fovY, aspect, near, far, type}) {
@@ -967,20 +1032,15 @@ class ExampleApp extends React.Component {
     // create container
     this.container = new Container();
 
-    // create camera
-    this.camera = new Camera({
+    this.renderer.newPerspectiveCamera({
       eye: [1, 2, -3],
       lookAt: [0.0, 0.0, 0.0],
       up: [0.0, -1.0, 0.0],
       fovY: 45,
-      aspect: this.refs.canvas.width/this.refs.canvas.height,
       near: 0.1,
-      far: 100.0,
-      type: "perspective"
+      far: 100.0
     });
 
-    // camera is owned by container
-    this.container.addCamera(this.camera);
 
     // container and renderer should be independent.
     // However, we should have a way to reset renderer to its initial state
