@@ -79,6 +79,7 @@ All rendering optimization (sorting/clipping etc...) happens here.
 // Base class
 class Renderer {
   constructor() {
+    this.controller = null;
   }
 }
 
@@ -111,8 +112,6 @@ class WebGLRenderer extends Renderer {
 
     // Render function controller
     this.activated = true;
-    // Active container to be rendered
-    this.activeContainer = null;
 
     // These are an array that holds processed geometries ready for rendering. It's build partly according to the geometries array in the activeContainer but should be optimized for rendering performance.
     this.activeRenderableGeometries = [];
@@ -151,10 +150,6 @@ class WebGLRenderer extends Renderer {
       return;
     }
 
-    // Initial set up of the animation loop
-    if (typeof window !== 'undefined') {
-      this.animationFrame = requestAnimationFrame(this._animationLoop);
-    }
 
     // Initial state of WebGL
     const gl = this.glContext;
@@ -167,21 +162,6 @@ class WebGLRenderer extends Renderer {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     console.log("WebGLRenderer._intialize() done");
-  }
-
-  @autobind _animationLoop() {
-    // console.log("WebGLRenderer._animationLoop() fired");
-
-    if (this.activated) {
-      this.render();
-    }
-    if (typeof window !== 'undefined') {
-      this.animationFrame = requestAnimationFrame(this._animationLoop);
-    }
-  }
-
-  setActiveContainer(container) {
-    this.activeContainer = container;
   }
 
   newPerspectiveCamera({id = "main", eye, lookAt, up, fovY, near, far}) {
@@ -202,10 +182,8 @@ class WebGLRenderer extends Renderer {
   /* Generating renderable geometry from abstract geometry.
   Renderable geometry doesn't need to match abstract geometry but to
   maximize the rendering performance. */
-  processContainers() {
-    console.log("WebGLRenderer.processContainers()");
-
-    let container = this.activeContainer;
+  regenerateRenderableGeometries(container) {
+    console.log("WebGLRenderer.regenerateRenderableGeometries()");
 
     /* When data structure changed, we need to update the rendering geometries.
     Right now, rendering geometries are regenerated from ground up. This should be
@@ -235,7 +213,6 @@ class WebGLRenderer extends Renderer {
 
       // Optimizing renderingGeometries
       // TODO
-      container.dataStructureChanged = false;
     }
   }
 
@@ -276,7 +253,6 @@ class WebGLRenderer extends Renderer {
   render function
   */
   render() {
-    const container = this.activeContainer;
     const gl = this.glContext;
     if (this.needsRedraw) {
       // if (this.frameNo % 3 === 0)
@@ -290,7 +266,6 @@ class WebGLRenderer extends Renderer {
       gl.clearColor(0.0, 0.0, 0.2, 1.0);
       gl.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
-      this.processContainers();
 
       for (let cameraID = 0; cameraID < this.cameraManager.cameras.length; cameraID++) {
         let currentCamera = this.cameraManager.cameras[cameraID];
@@ -709,8 +684,10 @@ than the data itself
 
 class Container {
   constructor() {
-    // A container can have multiple renderers
-    this.renderers = [];
+    // // A container can have multiple renderers
+    // this.renderers = [];
+    this.controller = null;
+
     /* It definitely can have multiple layers. We are expecting the
      whole framework to function properly with hundreds of layers */
     this.layers = [];
@@ -730,10 +707,10 @@ class Container {
     this.dataStructureChanged = true;
   }
 
-  attachRenderer(renderer) {
-    this.renderers.push(renderer);
-    renderer.setActiveContainer(this);
-  }
+  // attachRenderer(renderer) {
+  //   this.renderers.push(renderer);
+  //   renderer.setActiveContainer(this);
+  // }
 }
 
 /* Layers are data containers.
@@ -1000,6 +977,59 @@ class Camera {
   }
 }
 
+/* Controller class */
+class Controller {
+  constructor() {
+    this.container = null;
+    this.renderer = null;
+
+    // Initial set up of the animation loop
+    if (typeof window !== 'undefined') {
+      this.animationFrame = requestAnimationFrame(this._animationLoop);
+    }
+
+  }
+
+  addContainer(container) {
+    this.container = container;
+    container.controller = this;
+  }
+
+  addRenderer(renderer) {
+    this.renderer = renderer;
+    container.controller = this;
+  }
+
+  @autobind _animationLoop() {
+    // console.log("WebGLRenderer._animationLoop() fired");
+    this.update();
+    if (this.renderer.activated) {
+      this.render();
+    }
+    if (typeof window !== 'undefined') {
+      this.animationFrame = requestAnimationFrame(this._animationLoop);
+    }
+  }
+
+  update() {
+    // Handling data structure changes. It's obviously too aggressive to call regenerateRenderingGeometry() here but we can optimize later
+    if (this.container.dataStructureChanged) {
+      this.renderer.regenerateRenderableGeometries(this.container);
+      this.container.dataStructureChanged = false;
+    }
+
+    // TODO: Handling data only changes here
+
+  }
+
+  render() {
+    if (this.renderer != null) {
+      this.renderer.render();
+      this.renderer.needsRedraw = false;
+    }
+  }
+}
+
 /*
 Example App
 
@@ -1013,6 +1043,9 @@ class ExampleApp extends React.Component {
     super(props);
     this.state = {
     };
+    this.renderer = null;
+    this.container = null;
+    this.controller = null;
   }
 
   componentWillMount() {
@@ -1042,9 +1075,10 @@ class ExampleApp extends React.Component {
     });
 
 
-    // container and renderer should be independent.
-    // However, we should have a way to reset renderer to its initial state
-    this.container.attachRenderer(this.renderer);
+    this.controller = new Controller();
+    this.controller.addRenderer(this.renderer);
+    this.controller.addContainer(this.container);
+
 
     // These are all "layers"
 
@@ -1080,6 +1114,11 @@ class ExampleApp extends React.Component {
     this.container.addLayers(scatterplot);
     this.container.addLayers(plane);
   }
+
+  componentWillReceiveProps(props) {
+    console.log("componentWillReceiveProps");
+  }
+
 
   @autobind _handleResize() {
     this.setState({width: window.innerWidth, height: window.innerHeight});
