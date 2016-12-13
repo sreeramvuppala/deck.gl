@@ -67,7 +67,7 @@ function preprocessData(rawData) {
 }
 
 /*
-In most mobile apps, vanilla MVC pattern will sometimes lead to the "gigantic controller" situation that all codes are implemented in controller class while View and Model classes are relative simple. This is because most apps are dealing with complicated business logic and all those business logic operations map to the controller. This actually defeats the intention of MVC pattern and leads to unseparable classes that are hard to test andn maintain.
+In most mobile apps, vanilla MVC pattern will sometimes lead to the "gigantic controller" situation that all codes are implemented in controller class while View and Model classes are relative simple. This is because most apps are dealing with complicated business logic and all those business logic operations map to the controller. This actually defeats the intention of MVC pattern and leads to non-separable classes that are hard to test andn maintain.
 
 However, in our situation, MVC pattern works perfectly. In our visualization apps, View class are the most complicated part of the application, Model class can also be complicated if we'd like to implement some good data processing algorithms, such as PCA or t-SNE, and our Controller class can be very simple.
 */
@@ -82,7 +82,7 @@ to maximize resource reuse. It handles rendering pipeline configuration too.
 All rendering optimization (sorting/clipping etc...) happens here.
 */
 
-// Base class
+// Base class, this should be a protocol / abstract class
 class Renderer {
   constructor() {
     this.controller = null;
@@ -120,7 +120,7 @@ class WebGLRenderer extends Renderer {
     this.activated = true;
 
     // These are an array that holds processed geometries ready for rendering. It's build partly according to the geometries array in the activeContainer but should be optimized for rendering performance.
-    this.activeRenderableGeometries = [];
+    this.renderableGeometries = [];
 
     // These are rendering resource managers.
     this.bufferManager = new BufferManager(this);
@@ -133,7 +133,6 @@ class WebGLRenderer extends Renderer {
     */
 
     this.cameraManager = new CameraManager(this);
-//    this.shaderManager = new ShaderManager(this);
 
     this.framebufferManager = new FramebufferManager(this);
 
@@ -147,7 +146,7 @@ class WebGLRenderer extends Renderer {
 
     // Context creation
     this.currentCanvas = canvas;
-    this.debug = debug;
+    this.debug = true;
     this.contextOptions = glOptions;
     try {
       this.glContext = createGLContext({canvas, debug, ...glOptions});
@@ -161,31 +160,39 @@ class WebGLRenderer extends Renderer {
     // Initial WebGL states
     const gl = this.glContext;
 
-    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+    // gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
     gl.enable(gl.DEPTH_TEST);
-    gl.enable(gl.CULL_FACE);
-    gl.frontFace(gl.CCW);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // gl.enable(gl.CULL_FACE);
+    // gl.frontFace(gl.CCW);
+    // gl.enable(gl.BLEND);
+    // gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     console.log("WebGLRenderer._intialize() done");
   }
 
-  newPerspectiveCamera({id = "main", pos, anchor, up, fovY, near, far, target = 'default'}) {
+  newPerspectiveCamera({id = "main", pos, anchor, up, fovY, near, far, texture = false, width = this.currentCanvas.width, height = this.currentCanvas.height}) {
+    let aspect = width / height;
+    let target = null;
+    if (texture === true) {
+      target = this.framebufferManager.newFramebuffer({
+        width: width,
+        height: height
+      });
+    }
     this.cameraManager.newCamera({
       id: id,
       pos: pos,
       anchor: anchor,
       up: up,
       fovY: fovY,
-      aspect: this.currentCanvas.width / this.currentCanvas.height,
+      aspect: aspect,
       near: near,
       far: far,
-      type: "perspective",
       target: target
     })
     this.needsRedraw = true;
   }
+
 
   /* Generating renderable geometry from abstract geometry.
   Renderable geometry doesn't need to match abstract geometry but to
@@ -197,14 +204,15 @@ class WebGLRenderer extends Renderer {
     optimized to regenerating only the change part of the whole scene tree.
     Major optimization could happen here */
     if (container.dataStructureChanged === true) {
-      this.activeRenderableGeometries = [];
-      let activeRenderableGeometries = this.activeRenderableGeometries;
+      this.renderableGeometries = [];
+      let renderableGeometries = this.renderableGeometries;
 
       for (let i = 0; i < container.layers.length; i++) {
-        let currentGeometry = container.layers[container.layerOrder[i]].geometry;
-        let currentRenderableGeometry = new RenderableGeometry();
+        let layer = container.layers[container.layerOrder[i]];
+        let currentGeometry = layer.geometry;
+        let currentRenderableGeometry = new RenderableGeometry({id: layer.id});
 
-        activeRenderableGeometries.push(currentRenderableGeometry);
+        renderableGeometries.push(currentRenderableGeometry);
 
         for (let j = 0; j < currentGeometry.groups.length; j++) {
           let currentRenderableGroup = new RenderableGroup();
@@ -260,6 +268,22 @@ class WebGLRenderer extends Renderer {
     return currentRenderableMesh;
   }
 
+  /* This function will be significantly improved */
+  updateRenderableGeometries({container, layerID, groupID, meshID}) {
+    let geometry = this.getRenderableGeometryByID(layerID);
+    geometry.groups[groupID].meshes[meshID].updateVertexPosition(container.getLayerByID(layerID).geometry.groups[groupID].meshes[meshID].vertices);
+
+    /*TODO: We might also need to update other vertex attributes and uniforms*/
+  }
+
+  getRenderableGeometryByID(ID) {
+    for (let i = 0; i < this.renderableGeometries.length; i++) {
+      if (this.renderableGeometries[i].id === ID) {
+        return this.renderableGeometries[i];
+      }
+    }
+    return null;
+  }
   /* Rendering function
   Since most of the work has been done elsewhere. This function should be
   kept very simple. Just iterate through all renderable meshes and call their
@@ -276,15 +300,20 @@ class WebGLRenderer extends Renderer {
       // } else {
       //   gl.clearColor(0.0, 0.0, 0.2, 1.0);
       // }
-      this.renderer.glContext.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
-
+      /* Different rendering passes can be added to the render() function
+      e.g. render to texture, shadow pass, etc...
+      */
+      let renderToScreenStage = false;
+      let saveToDisk = false;
       for (let cameraID = 0; cameraID < this.cameraManager.cameras.length; cameraID++) {
         // Get current camera and set appropriate framebuffer
         let currentCamera = this.cameraManager.getCamera(cameraID);
-
+        if (this.cameraManager.getCameraTarget(cameraID) !== -1) {
+          renderToScreenStage = true;
+        }
         let transformMatrices = currentCamera.getTransformMatrices();
-        for (let i = 0; i < this.activeRenderableGeometries.length; i++) {
-          let currentRenderableGeometry = this.activeRenderableGeometries[i];
+        for (let i = 0; i < this.renderableGeometries.length; i++) {
+          let currentRenderableGeometry = this.renderableGeometries[i];
 
           for (let j = 0; j < currentRenderableGeometry.groups.length; j++) {
             let currentRenderableGroup = currentRenderableGeometry.groups[j];
@@ -296,15 +325,60 @@ class WebGLRenderer extends Renderer {
             }
           }
         }
-        //this.framebufferManager.outputContent(currentCameraTarget);
+        // Put the rendered content of the first camera to screen
+        if (renderToScreenStage === true) {
+          this.renderToScreen(this.framebufferManager.getFramebufferTexture(this.cameraManager.getCameraTarget(cameraID)));
+        }
+        if (saveToDisk === true) {
+          //this.framebufferManager.outputContent(currentCameraTarget);
+        }
       }
-      console.log("Draw completed. Frame No. ", this.frameNo);
 
+      console.log("Draw completed. Frame No. ", this.frameNo);
 
       this.needsRedraw = false;
       this.frameNo++;
     }
   }
+
+  renderToScreen(tex) {
+    const gl = this.glContext;
+    this.framebufferManager.bindFramebuffer(-1);
+
+    let screenQuadProgram = this.programManager.getProgram(this.programManager.getScreenQuadProgramID());
+
+    screenQuadProgram.use();
+
+
+    // This is just to show buffer reuse. Change planeXY will affect the on-screen compositing, which is
+    // not what we want.
+    // Also be awared that we are acutally looking at the "back" face of this on-screen quad, since left hand coord is used for NDC space
+
+    let buffer0 = this.bufferManager.getVertexBufferByName("triangles_planeXY_vertex_position");
+    let buffer1 = this.bufferManager.getVertexBufferByName("triangles_planeXY_vertex_tex_coord");
+    let buffer2 = this.bufferManager.getVertexIndexBufferByName("triangles_planeXY_vertex_index");
+
+    /* left hand coord is used for NDC space */
+    // let buffer2 = new Buffer(gl).setData({
+    //   data: new Uint16Array([0, 2, 1, 2, 3, 1]),
+    //   target: GL.ELEMENT_ARRAY_BUFFER,
+    //   size: 1
+    // });
+
+    screenQuadProgram.setBuffers({
+      position: buffer0,
+      texCoords: buffer1,
+      index: buffer2
+    });
+
+    screenQuadProgram.setUniforms({
+      screenTexture: tex
+    });
+
+
+    gl.drawElements(GL.TRIANGLES, 6, GL.UNSIGNED_SHORT, 0);
+  }
+
 }
 
 /* Resource manager classes
@@ -316,27 +390,46 @@ class BufferManager {
     this.vertexIndexBuffers = [];
   }
 
-  newVertexBuffer({data, size, instanced = 0}) {
-    let buffer = new Buffer(this.renderer.glContext);
+  newVertexBuffer({data, size, instanced = 0, id = ''}) {
+    let buffer = new Buffer(this.renderer.glContext, {id: id});
     buffer.setData({data: data, size: size, target: GL.ARRAY_BUFFER, instanced: instanced});
     this.vertexBuffers.push(buffer);
     return this.vertexBuffers.length - 1;
   }
 
-  newVertexIndexBuffer({data}) {
-    let buffer = new Buffer(this.renderer.glContext);
+  newVertexIndexBuffer({data, id = ''}) {
+    let buffer = new Buffer(this.renderer.glContext, {id: id});
     buffer.setData({data: data, target: GL.ELEMENT_ARRAY_BUFFER});
     this.vertexIndexBuffers.push(buffer);
     return this.vertexIndexBuffers.length - 1;
   }
 
-  getVertexBuffer(index) {
+  getVertexBufferByID(index) {
     return this.vertexBuffers[index];
   }
 
-  getVertexIndexBuffer(index) {
+  getVertexIndexBufferByID(index) {
     return this.vertexIndexBuffers[index];
   }
+
+  getVertexBufferByName(name) {
+    for (let index = 0; index < this.vertexBuffers.length; index++) {
+      if (this.vertexBuffers[index].id === name) {
+        return this.vertexBuffers[index];
+      }
+    }
+    return null;
+  }
+
+  getVertexIndexBufferByName(name) {
+    for (let index = 0; index < this.vertexIndexBuffers.length; index++) {
+      if (this.vertexIndexBuffers[index].id === name) {
+        return this.vertexBuffers[index];
+      }
+    }
+    return null;
+  }
+
 }
 
 /*shader management should go here*/
@@ -346,6 +439,7 @@ class ProgramManager {
     this.programs = [];
 
     this.defaultProgram = null;
+    this.screenQuadProgram = null;
   }
 
   newProgramFromShaders({vsSource, fsSource}) {
@@ -394,6 +488,48 @@ class ProgramManager {
         fs: fsSource
       });
       this.programs.push(defaultProgram);
+
+      this.defaultProgram = defaultProgram;
+
+    }
+
+    if (this.screenQuadProgram === null) {
+      const vsSource = `\
+      attribute vec3 position;
+      attribute vec2 texCoords;
+
+      varying vec2 vTexCoords;
+
+      void main(void) {
+        vTexCoords = texCoords;
+        gl_Position = vec4(position, 1.0);
+      }
+      `;
+
+      const fsSource = `\
+      #ifdef GL_ES
+      precision highp float;
+      #endif
+
+      uniform sampler2D screenTexture;
+      varying vec2 vTexCoords;
+
+      void main(void) {
+        gl_FragColor = texture2D(screenTexture, vTexCoords);
+      }
+      `;
+
+      // this._vertexShaderID = this.renderer.shaderManager.newShaderFromSource(vsSource, GL.VERTEX_SHADER);
+
+      // this._fragmentShaderID = this.renderer.shaderManager.newShaderFromSource(fsSource, GL.FRAGMENT_SHADER);
+
+      const screenQuadProgram = new Program(this.renderer.glContext, {
+        vs: vsSource,
+        fs: fsSource
+      });
+      this.programs.push(screenQuadProgram);
+
+      this.screenQuadProgram = screenQuadProgram;
     }
 
     const program = new Program(this.renderer.glContext, {
@@ -411,6 +547,10 @@ class ProgramManager {
 
   getDefaultProgramID() {
     return 0;
+  }
+
+  getScreenQuadProgramID() {
+    return 1;
   }
 }
 
@@ -435,25 +575,39 @@ class FramebufferManager {
   }
 
   newFramebuffer({width, height}) {
-    let framebuffer = new Framebuffer(this.renderer.glContext);
-    framebuffer.resize({
-      width: 16,
-      height: 16
-    })
+    let framebuffer = new Framebuffer(this.renderer.glContext, {width: width, height: height});
     this.framebuffers.push(framebuffer);
     return this.framebuffers.length - 1;
   }
 
   bindFramebuffer(ID) {
+    let gl = this.renderer.glContext;
     if (ID === -1) {
-      this.renderer.glContext.bindFramebuffer(this.renderer.glContext.FRAMEBUFFER, null);
+      gl.bindFramebuffer(GL.FRAMEBUFFER, null);
+      gl.clearColor(0.2, 0.0, 0.0, 1.0);
+      gl.enable(gl.DEPTH_TEST);
+      // gl.enable(gl.CULL_FACE);
+      // gl.frontFace(gl.CCW);
     } else {
       this.framebuffers[ID].bind();
+      gl.clearColor(0.0, 0.0, 0.2, 1.0);
+      gl.enable(gl.DEPTH_TEST);
+      // gl.enable(gl.CULL_FACE);
+      // gl.frontFace(gl.CCW);
     }
-    this.renderer.glContext.clearColor(0.0, 0.0, 0.2, 1.0);
-    this.renderer.glContext.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
+    gl.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
+
+    // gl.enable(gl.DEPTH_TEST);
+    // gl.enable(gl.CULL_FACE);
+    // gl.frontFace(gl.CCW);
+    // gl.enable(gl.BLEND);
+    // gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
   }
 
+  getFramebufferTexture(ID) {
+    return this.framebuffers[ID].texture;
+  }
   // outputContent(ID) {
   //   if (ID === -1) {
   //     this.renderer.glContext.bindFramebuffer(this.renderer.glContext.FRAMEBUFFER, null);
@@ -481,8 +635,8 @@ most of interactive commands from the user */
 class CameraManager {
   constructor(renderer) {
     this.renderer = renderer;
-    this.cameras = [];
-    this.cameraTargets = [];
+    this.cameras = []; // stores Camera objects
+    this.cameraTargets = []; // stores Framebuffer objects
   }
 
   newCamera({id, pos, anchor, up, fovY, aspect, near, far, type, target}) {
@@ -500,19 +654,21 @@ class CameraManager {
 
     this.cameras.push(camera);
 
-    if (target === "default") {
+    if (target === null) {
       this.cameraTargets.push(-1); // using a special sentinel value for default framebuffer target
-    } else if (target === "texture") {
-      this.cameraTargets.push(this.renderer.framebufferManager.newFramebuffer({
-        width: 1024,
-        height: 1024
-      }));
+    } else {
+      this.cameraTargets.push(target);
     }
   }
 
   getCamera(ID) {
-    this.renderer.framebufferManager.bindFramebuffer(this.cameraTargets[cameraID]);
+    let gl = this.renderer.glContext;
+    this.renderer.framebufferManager.bindFramebuffer(this.cameraTargets[ID]);
+
     return this.cameras[ID];
+  }
+  getCameraTarget(ID) {
+    return this.cameraTargets[ID];
   }
   moveDefaultCameraToAnchor({distance}) {
     this.cameras[0].moveToAnchor({
@@ -526,8 +682,9 @@ class CameraManager {
   It holds the renderable model of a layer
 */
 class RenderableGeometry {
-  constructor() {
+  constructor({id}) {
     this.groups = [];
+    this.id = id;
   }
 }
 
@@ -571,18 +728,22 @@ class RenderableMesh {
 
     // All renderable mesh need to have vertice position, texture coords, vertex color and vertex indices
     this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
+      id: mesh.id + '_vertex_position',
       data: mesh.vertices,
       size: 3
     }));
     this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
+      id: mesh.id + '_vertex_tex_coord',
       data: mesh.texCoords,
       size: 2
     }));
     this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
+      id: mesh.id + '_vertex_color',
       data: mesh.color,
       size: 4
     }));
     this._vertexIndexBufferID = this.renderer.bufferManager.newVertexIndexBuffer({
+      id: mesh.id + '_vertex_index',
       data: mesh.vertexIndices
     });
 
@@ -591,11 +752,11 @@ class RenderableMesh {
 
   // Convenient function for communicating with resource managers
   getVertexBufferByID(id) {
-    return this.renderer.bufferManager.getVertexBuffer(id);
+    return this.renderer.bufferManager.getVertexBufferByID(id);
   }
 
   getVertexIndexBufferByID(id) {
-    return this.renderer.bufferManager.getVertexIndexBuffer(id);
+    return this.renderer.bufferManager.getVertexIndexBufferByID(id);
   }
 
   getProgramByID(id) {
@@ -625,6 +786,8 @@ class RenderableMesh {
 }
 
 // All RenderableMesh objects know how to render itself
+// Probably WebGLTriangles, WebGLLines, WebGLPoints, WebGLQuads and their instanced counterparts will suffice right now
+
 class WebGLTriangles extends RenderableMesh {
   constructor({triangles, renderer}) {
     super({mesh: triangles, renderer: renderer});
@@ -634,6 +797,10 @@ class WebGLTriangles extends RenderableMesh {
   render(transformMatrices) {
     super.render(transformMatrices);
     this.renderer.glContext.drawElements(GL.TRIANGLES, this._numberOfPrimitives * 3, this.renderer.glContext.UNSIGNED_SHORT, 0);
+  }
+
+  updateVertexPosition(data) {
+    this.getVertexBufferByID(this._vertexBufferIDs[0]).setData({data: data, size: 3, target: GL.ARRAY_BUFFER});
   }
 }
 
@@ -662,17 +829,20 @@ class WebGLInstancedTriangles extends RenderableMesh {
     this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: instancedTriangles.instancedPosition,
       size: 3,
-      instanced: 1
+      instanced: 1,
+      id: instancedTriangles.id + '_instanced_position',
     }));
     this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: instancedTriangles.instancedColor,
       size: 4,
-      instanced: 1
+      instanced: 1,
+      id: instancedTriangles.id + '_instanced_color',
     }));
     this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
       data: instancedTriangles.instancedRadius,
       size: 1,
-      instanced: 1
+      instanced: 1,
+      id: instancedTriangles.id + '_instanced_radius',
     }));
 
     // Standard instanced drawing shaders
@@ -797,6 +967,15 @@ class Container {
     this.dataChanged = true;
     this.dataStructureChanged = true;
   }
+
+  getLayerByID(id) {
+    for (let i = 0; i < this.layers.length; i++) {
+      if (this.layers[i].id === id) {
+        return this.layers[i];
+      }
+    }
+    return null;
+  }
 }
 
 /* Layers are data containers.
@@ -805,7 +984,7 @@ class Container {
   at most four with a dimension of time?)
 */
 class Layer {
-  constructor() {
+  constructor({id = ''}) {
     /* data holds the abstract data (or called unprocessed data) in its original form */
     this.data = null;
     /* geometry is a tree structure that hold data in a more presentable way
@@ -817,6 +996,8 @@ class Layer {
     this.computeContext = null;
 
     this.useGPUCompute = false;
+
+    this.id = id;
   }
 
   generateGeometry() {
@@ -826,17 +1007,17 @@ class Layer {
 
 
 class Plane extends Layer {
-  constructor({data}) {
-    super();
+  constructor({data, id = ''}) {
+    super({id: id});
     this.data = data;
 
     // Color, texture coordinates and vertex indices are representation related
     // So they are stored in geometry instead of directly under Layer
 
     this.geometry.data = data;
-    this.geometry.texCoords = [1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-    this.geometry.color = [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.5, 1.0, 1.0, 0.0, 0.5];
-    this.geometry.vertexIndices = [0, 2, 1, 3, 1, 2];
+    this.geometry.texCoords = [0, 0, 1, 0, 0, 1, 1, 1];
+    this.geometry.color = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0];
+    this.geometry.vertexIndices = [0, 2, 1, 2, 3, 1];
   }
 
   generateGeometry() {
@@ -848,21 +1029,40 @@ class Plane extends Layer {
       texCoords: this.geometry.texCoords,
       color: this.geometry.color,
       vertexIndices: this.geometry.vertexIndices,
-      id: 0
+      id: this.id
     });
 
     defaultGroup.meshes.push(quad);
+  }
+
+  updateGeometry({groupID, meshID}) {
+    this.geometry.groups[groupID].meshes[meshID].updateVertices(this.data);
+  }
+
+  rotateAlongXAxis(angle) {
+    this.data[1] = this.data[1] * Math.cos(angle) - this.data[2] * Math.sin(angle);
+    this.data[2] = this.data[1] * Math.sin(angle) + this.data[2] * Math.cos(angle);
+    this.data[4] = this.data[4] * Math.cos(angle) - this.data[5] * Math.sin(angle);
+    this.data[5] = this.data[4] * Math.sin(angle) + this.data[5] * Math.cos(angle);
+    this.data[7] = this.data[7] * Math.cos(angle) - this.data[8] * Math.sin(angle);
+    this.data[8] = this.data[7] * Math.sin(angle) + this.data[8] * Math.cos(angle);
+    this.data[10] = this.data[10] * Math.cos(angle) - this.data[11] * Math.sin(angle);
+    this.data[11] = this.data[10] * Math.sin(angle) + this.data[11] * Math.cos(angle);
+    this.updateGeometry({
+      groupID: 0,
+      meshID: 0
+    });
   }
 }
 
 class Axes extends Layer {
   constructor() {
-    super();
+    super({id: 'axis'});
     this.data = [[-2.0, 0.0, 0.0, 2.0, 0.0, 0.0], [0.0, -2.0, 0.0, 0.0, 2.0, 0.0], [0.0, 0.0, -2.0, 0.0, 0.0, 2.0]];
 
     this.geometry.data = this.data;
     this.geometry.texCoords = [[1.0, 1.0, 1.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
-    this.geometry.color = [[1.0, 0.5, 0.0, 1.0, 1.0, 0.0, 0.5, 1.0], [0.0, 0.5, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0], [0.5, 1.0, 0.0, 1.0, 0.0, 1.0, 0.5, 1.0]];
+    this.geometry.color = [[1.0, 0.0, 0.0, 1.0 /*red*/, 0.0, 1.0, 0.0, 1.0/*green*/], [0.0, 0.0, 1.0, 1.0/*blue*/, 1,0, 1.0, 0.0, 1.0/*magenta*/], [0.0, 1.0, 1.0, 1.0,/*cyan*/ 1.0, 0.0, 0.1, 1.0 /*yellow*/]];
     this.geometry.vertexIndices = [0, 1];
   }
 
@@ -876,7 +1076,8 @@ class Axes extends Layer {
         vertices: this.data[lineID],
         texCoords: this.geometry.texCoords[lineID],
         color: this.geometry.color[lineID],
-        vertexIndices: this.geometry.vertexIndices
+        vertexIndices: this.geometry.vertexIndices,
+        id: this.id + lineID
       });
 
       defaultGroup.meshes.push(line);
@@ -885,8 +1086,8 @@ class Axes extends Layer {
 }
 
 class Scatterplot3D extends Layer {
-  constructor({data, color, size}) {
-    super();
+  constructor({data, color, size, id = ''}) {
+    super({id: id});
     this.data = data;
     this.geometry.data = data;
     this.geometry.color = color;
@@ -902,7 +1103,8 @@ class Scatterplot3D extends Layer {
     let instancedSpheres = new InstancedSpheres({
       instancedPosition: flattenDeep(this.geometry.data),
       instancedColor: flattenDeep(this.geometry.color),
-      instancedRadius: flattenDeep(this.geometry.size)
+      instancedRadius: flattenDeep(this.geometry.size),
+      id: this.id
     })
 
     defaultGroup.meshes.push(instancedSpheres);
@@ -910,8 +1112,8 @@ class Scatterplot3D extends Layer {
 }
 
 class L2NormScatterplot extends Layer {
-  constructor({data, color, size}) {
-    super();
+  constructor({data, color, size, id = ''}) {
+    super({id: id});
     this.data = data;
     this.geometry.color = color;
     this.geometry.size = size;
@@ -928,7 +1130,8 @@ class L2NormScatterplot extends Layer {
     let instancedSpheres = new InstancedSpheres({
       instancedPosition: flattenDeep(this.geometry.data),
       instancedColor: flattenDeep(this.geometry.color),
-      instancedRadius: flattenDeep(this.geometry.size.map(a => a * 0.3))
+      instancedRadius: flattenDeep(this.geometry.size.map(a => a * 0.3)),
+      id: this.id
     })
 
     defaultGroup.meshes.push(instancedSpheres);
@@ -985,7 +1188,7 @@ class Mesh {
     this.vertexIndices = null;
     this.normals = null;
     this.modelMatrix = null;
-    this.id = null;
+    this.id = '';
   }
 }
 
@@ -998,7 +1201,13 @@ class Triangles extends Mesh {
     this.color = new Float32Array(color);
     this.vertexIndices = new Uint16Array(vertexIndices);
     this.modelMatrix = mat4.create();
-    this.id = id;
+    this.id = 'triangles_' + id;
+  }
+
+  updateVertices(newVertices) {
+    for (let i = 0; i < this.vertices.length; i++) {
+      this.vertices[i] = newVertices[i];
+    }
   }
 }
 
@@ -1010,7 +1219,7 @@ class Line extends Mesh {
     this.color = new Float32Array(color);
     this.vertexIndices = new Uint16Array(vertexIndices);
     this.modelMatrix = mat4.create();
-    this.id = id;
+    this.id = 'line_' + id;
   }
 }
 
@@ -1051,7 +1260,7 @@ class InstancedSpheres extends Mesh {
     this.instancedRadius = new Float32Array(instancedRadius);
 
     this.modelMatrix = mat4.create();
-    this.id = id;
+    this.id = 'instanced_sphere_' + id;
 
 
   }
@@ -1109,6 +1318,7 @@ class Camera {
     this.transformMatrices.viewMatrix = viewMatrix;
     this.transformMatrices.projectionMatrix = projectionMatrix;
     this.transformMatrices.viewProjectionMatrix = viewProjectionMatrix;
+
   }
 
   moveToAnchor({distance}) {
@@ -1135,6 +1345,9 @@ class Controller {
   constructor() {
     this.container = null;
     this.renderer = null;
+    this.startTime = new Date();
+    this.previousUpdateTime = this.startTime;
+    this.currentTime = null;
 
     // Initial set up of the animation loop
     if (typeof window !== 'undefined') {
@@ -1164,14 +1377,35 @@ class Controller {
   }
 
   update() {
+    this.currentTime = new Date();
+    /* rotate a layer along X axis */
+    let layer = this.container.getLayerByID('planeYZ');
+    let deltaAngle = (this.currentTime - this.previousUpdateTime) / 1e4;
+    layer.rotateAlongXAxis(deltaAngle);
+
+    this.previousUpdateTime = this.currentTime;
+    /* Should the data changed be a data structure that tells the updateRenderableGeometries() below where the data has changed? or we should just let updateRenderableGeometries() iterate through all meshes.
+
+    Prefer the former but didn't have time to implement */
+    this.container.dataChanged = true;
+    this.renderer.needsRedraw = true;
+
     // Handling data structure changes. It's obviously too aggressive to call regenerateRenderingGeometry() here but we can optimize later
     if (this.container.dataStructureChanged) {
       this.renderer.regenerateRenderableGeometries(this.container);
       this.container.dataStructureChanged = false;
     }
 
-    // TODO: Handling data only changes here
-
+    // Handling data content changes here
+    if (this.container.dataChanged) {
+      this.renderer.updateRenderableGeometries({
+        container: this.container,
+        layerID: 'planeYZ',
+        groupID: 0,
+        meshID: 0
+      });
+      this.container.dataChanged = false;
+    }
   }
 
   render() {
@@ -1236,30 +1470,33 @@ class ExampleApp extends React.Component {
     this.defaultContainer.initialize(this.refs.compute);
     this.defaultController.addContainer(this.defaultContainer);
 
-    this.defaultRenderer.newPerspectiveCamera({
-      pos: [1, 2, -3],
-      anchor: [0.0, 0.0, 0.0],
-      up: [0.0, -1.0, 0.0],
-      fovY: 45,
-      near: 0.1,
-      far: 100.0
-    });
-
     // this.defaultRenderer.newPerspectiveCamera({
-    //   pos: [3, 1, -6],
+    //   pos: [1, 1, -2],
     //   anchor: [0.0, 0.0, 0.0],
     //   up: [0.0, -1.0, 0.0],
-    //   fovY: 45,
-    //   near: 0.1,
-    //   far: 100.0,
-    //   target: "texture"
+    //   fovY: 45 / 180 * Math.PI,
+    //   near: 0.01,
+    //   far: 100.0
     // });
+
+    this.defaultRenderer.newPerspectiveCamera({
+      pos: [1.0, 1.0, -2],
+      anchor: [0.0, 0.0, 0.0],
+      up: [0.0, -1.0, 0.0],
+      fovY: 45 / 180 * Math.PI,
+      near: 0.01,
+      far: 100.0,
+      texture: true
+    });
 
     // These are all "layers"
     // These two are opaque layers
     const axes = new Axes();
     this.defaultContainer.addLayers(axes);
 
+    // let scatterplotData = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]];
+    // let scatterplotColor = [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0]];
+    // let scatterplotSize = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2];
     let scatterplotData = [];
     let scatterplotColor = [];
     let scatterplotSize = [];
@@ -1292,10 +1529,23 @@ class ExampleApp extends React.Component {
     this.defaultContainer.addLayers(norm);
 
     // This is a transparent layer.
-    const plane = new Plane({
-      data: [1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, -1.0, 0.0, -1.0, -1.0, 0.0]
+    const planeXY = new Plane({
+      data: [-1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0],
+      id: 'planeXY'
     });
-    this.defaultContainer.addLayers(plane);
+    this.defaultContainer.addLayers(planeXY);
+
+    const planeYZ = new Plane({
+      data: [0, -1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1],
+      id: 'planeYZ'
+    });
+    this.defaultContainer.addLayers(planeYZ);
+
+    const planeXZ = new Plane({
+      data: [-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1],
+      id: 'planeXZ'
+    });
+    this.defaultContainer.addLayers(planeXZ);
 
     /* We could let render() function to call generateGeometry() but I
     feel it's beneficial to have a way of calling generateGeometry() manually
@@ -1303,14 +1553,14 @@ class ExampleApp extends React.Component {
     axes.generateGeometry();
     scatterplot.generateGeometry();
     norm.generateGeometry();
-    plane.generateGeometry();
-
+    planeXY.generateGeometry();
+    planeYZ.generateGeometry();
+    planeXZ.generateGeometry();
   }
 
   componentWillReceiveProps(props) {
     console.log("componentWillReceiveProps");
   }
-
 
   @autobind _handleResize() {
     this.setState({width: window.innerWidth, height: window.innerHeight});
