@@ -1,3 +1,4 @@
+abstract/dist/*
 dist/*
 dist-demo/*
 demo/dist/*
