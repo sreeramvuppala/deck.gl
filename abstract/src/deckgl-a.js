@@ -119,7 +119,6 @@ export default class DeckGLA extends React.Component {
     // Called at every animation loop
     this.animationLoopUpdate();
 
-
   }
 
   propsChangedUpdate() {
@@ -135,12 +134,13 @@ export default class DeckGLA extends React.Component {
     this.propsChanged = false;
   }
 
-  updateRenderableGeometries({layerID, groupID, meshID}) {
+  updateRenderableGeometries({layerID, groupID, meshID, attributeID}) {
     this.renderer.updateRenderableGeometries({
       container: this.container,
       layerID,
       groupID,
-      meshID
+      meshID,
+      attributeID
     });
     this.renderer.needsRedraw = true;
   }

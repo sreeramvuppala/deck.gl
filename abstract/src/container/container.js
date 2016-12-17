@@ -50,11 +50,12 @@ export default class Container {
   notifyDataStructureChange() {
   }
 
-  notifyDataChange({layerID, groupID, meshID}) {
+  notifyDataChange({layerID, groupID, meshID, attributeID}) {
     this.controller.updateRenderableGeometries({
       layerID,
       groupID: 0,
-      meshID: 0
+      meshID: 0,
+      attributeID
     });
   }
 }

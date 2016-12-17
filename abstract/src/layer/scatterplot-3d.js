@@ -1,6 +1,21 @@
 import {Layer} from './layer';
 import {InstancedSpheres} from '../mesh';
-import flattenDeep from 'lodash.flattendeep';
+
+function flatten(data) {
+  const dim0 = data.length;
+  const dim1 = data[0].length;
+
+  if (dim1 === undefined) {
+    return data;
+  }
+  const retArray = new Array(dim0 * dim1);
+  for (let i = 0; i < dim0; i++) {
+    for (let j = 0; j < dim1; j++) {
+      retArray[j + i * dim1] = data[i][j];
+    }
+  }
+  return retArray;
+}
 
 export default class Scatterplot3D extends Layer {
   constructor({data, color, size, id = ''}) {
@@ -15,9 +30,9 @@ export default class Scatterplot3D extends Layer {
     /* We didn't some data processing here. (even though
     it's pretty straight-forward flatten operation) */
     const instancedSpheres = new InstancedSpheres({
-      instancedPosition: flattenDeep(this.geometry.data),
-      instancedColor: flattenDeep(this.geometry.color),
-      instancedRadius: flattenDeep(this.geometry.size),
+      instancedPosition: flatten(this.geometry.data),
+      instancedColor: flatten(this.geometry.color),
+      instancedRadius: flatten(this.geometry.size),
       id: this.id
     });
 
@@ -38,10 +53,18 @@ export default class Scatterplot3D extends Layer {
   updateGeometry() {
     const groupID = 0;
     const meshID = 0;
-    this.geometry.groups[groupID].meshes[meshID].updateInstancedPositions(flattenDeep(this.geometry.data));
+    this.geometry.groups[groupID].meshes[meshID].updateAttribute({
+      attributeID: 'instancedPosition',
+      data: flatten(this.geometry.data)
+    });
     // notify the container that data has changed
     for (let i = 0; i < this.containers.length; i++) {
-      this.containers[i].notifyDataChange({layerID: this.id, groupID, meshID});
+      this.containers[i].notifyDataChange({
+        layerID: this.id,
+        groupID,
+        meshID,
+        attributeID: 'instancedPosition'
+      });
     }
   }
 }

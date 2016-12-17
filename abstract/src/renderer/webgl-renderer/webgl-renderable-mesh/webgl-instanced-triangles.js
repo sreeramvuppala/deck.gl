@@ -5,29 +5,40 @@ export default class WebGLInstancedTriangles extends WebGLRenderableMesh {
   constructor({instancedTriangles, renderer}) {
     super({mesh: instancedTriangles, renderer});
 
-    this._numberOfPrimitives = instancedTriangles.vertexIndices.length / 3;
+    this._numberOfPrimitives = instancedTriangles.attributes.get('vertexIndices').length / 3;
 
     // Additional properties and attributes required for instanced drawing
-    this._numberOfInstances = instancedTriangles.instancedPosition.length / 3;
+    this._numberOfInstances = instancedTriangles.attributes.get('instancedPosition').length / 3;
 
-    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
-      data: instancedTriangles.instancedPosition,
-      size: 3,
-      instanced: 1,
-      id: instancedTriangles.id + '_instanced_position'
-    }));
-    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
-      data: instancedTriangles.instancedColor,
-      size: 4,
-      instanced: 1,
-      id: instancedTriangles.id + '_instanced_color'
-    }));
-    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
-      data: instancedTriangles.instancedRadius,
-      size: 1,
-      instanced: 1,
-      id: instancedTriangles.id + '_instanced_radius'
-    }));
+    this._vertexBufferIDs.set(
+      'instancedPosition',
+      this.renderer.bufferManager.newVertexBuffer({
+        data: instancedTriangles.attributes.get('instancedPosition'),
+        size: 3,
+        instanced: 1,
+        id: instancedTriangles.id + '_instanced_position'
+      })
+    );
+
+    this._vertexBufferIDs.set(
+      'instancedColor',
+      this.renderer.bufferManager.newVertexBuffer({
+        data: instancedTriangles.attributes.get('instancedColor'),
+        size: 4,
+        instanced: 1,
+        id: instancedTriangles.id + '_instanced_color'
+      })
+    );
+
+    this._vertexBufferIDs.set(
+      'instancedRadius',
+      this.renderer.bufferManager.newVertexBuffer({
+        data: instancedTriangles.attributes.get('instancedRadius'),
+        size: 1,
+        instanced: 1,
+        id: instancedTriangles.id + '_instanced_radius'
+      })
+    );
 
     // Standard instanced drawing shaders
     const vsSource = `\
@@ -82,9 +93,9 @@ export default class WebGLInstancedTriangles extends WebGLRenderableMesh {
     and sub class's render(), luma.gl will complain that some attributes are not supplied
     in the first setBuffers() call. But the rendering works fine */
     this.getProgramByID(this._programID).setBuffers({
-      instancedPosition: this.getVertexBufferByID(this._vertexBufferIDs[3]),
-      instancedColor: this.getVertexBufferByID(this._vertexBufferIDs[4]),
-      instancedRadius: this.getVertexBufferByID(this._vertexBufferIDs[5])
+      instancedPosition: this.getVertexBufferByID('instancedPosition'),
+      instancedColor: this.getVertexBufferByID('instancedColor'),
+      instancedRadius: this.getVertexBufferByID('instancedRadius')
     });
 
     const extension = this.renderer.glContext.getExtension('ANGLE_instanced_arrays');
@@ -94,8 +105,8 @@ export default class WebGLInstancedTriangles extends WebGLRenderableMesh {
       );
   }
 
-  updateVertexInstancedPosition(data) {
-    this.getVertexBufferByID(this._vertexBufferIDs[3]).setData({data, size: 3, target: GL.ARRAY_BUFFER, instanced: 1});
+  updateAttribute({attributeID, mesh}) {
+    this.getVertexBufferByID(attributeID).setData({data: mesh.attributes.get(attributeID), size: 3, target: GL.ARRAY_BUFFER, instanced: 1});
   }
 
 }

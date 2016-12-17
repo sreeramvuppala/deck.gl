@@ -178,9 +178,12 @@ export default class WebGLRenderer extends Renderer {
   }
 
   /* This function will be significantly improved */
-  updateRenderableGeometries({container, layerID, groupID, meshID}) {
+  updateRenderableGeometries({container, layerID, groupID, meshID, attributeID}) {
     const geometry = this.getRenderableGeometryByID(layerID);
-    geometry.groups[groupID].meshes[meshID].updateVertexInstancedPosition(container.getLayerByID(layerID).geometry.groups[groupID].meshes[meshID].instancedPosition);
+    geometry.groups[groupID].meshes[meshID].updateAttribute({
+      attributeID,
+      mesh: container.getLayerByID(layerID).geometry.groups[groupID].meshes[meshID]
+    });
 
     /*TODO: We might also need to update other vertex attributes and uniforms*/
   }

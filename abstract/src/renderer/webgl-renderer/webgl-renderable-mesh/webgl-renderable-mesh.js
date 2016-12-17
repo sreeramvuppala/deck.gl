@@ -18,7 +18,7 @@ export class WebGLRenderableMesh {
     this.mesh = mesh;
 
     // We store IDs here because our buffer management is centralized.
-    this._vertexBufferIDs = [];
+    this._vertexBufferIDs = new Map();
 
     // Number of primitives depends on what kind of primitive this mesh holds
     this._numberOfPrimitives = 0;
@@ -31,36 +31,51 @@ export class WebGLRenderableMesh {
     this._programID = this.renderer.programManager.getDefaultProgramID();
 
     // All renderable mesh need to have vertice position, texture coords, vertex color and vertex indices
-    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
-      id: mesh.id + '_vertex_position',
-      data: mesh.vertices,
-      size: 3
-    }));
-    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
-      id: mesh.id + '_vertex_tex_coord',
-      data: mesh.texCoords,
-      size: 2
-    }));
-    this._vertexBufferIDs.push(this.renderer.bufferManager.newVertexBuffer({
-      id: mesh.id + '_vertex_color',
-      data: mesh.color,
-      size: 4
-    }));
-    this._vertexIndexBufferID = this.renderer.bufferManager.newVertexIndexBuffer({
-      id: mesh.id + '_vertex_index',
-      data: mesh.vertexIndices
-    });
+    this._vertexBufferIDs.set(
+      'vertices',
+      this.renderer.bufferManager.newVertexBuffer({
+        id: mesh.id + '_vertex_position',
+        data: mesh.attributes.get('vertices'),
+        size: 3
+      })
+    );
+
+    this._vertexBufferIDs.set(
+      'texCoords',
+      this.renderer.bufferManager.newVertexBuffer({
+        id: mesh.id + '_vertex_tex_coord',
+        data: mesh.attributes.get('texCoords'),
+        size: 2
+      })
+    );
+
+    this._vertexBufferIDs.set(
+      'color',
+      this.renderer.bufferManager.newVertexBuffer({
+        id: mesh.id + '_vertex_color',
+        data: mesh.attributes.get('color'),
+        size: 4
+      })
+    )
+
+    this._vertexBufferIDs.set(
+      'vertexIndices',
+      this.renderer.bufferManager.newVertexIndexBuffer({
+        id: mesh.id + '_vertex_index',
+        data: mesh.attributes.get('vertexIndices')
+      })
+    );
 
     console.log("WebGLRenderable.constructor() done");
   }
 
   // Convenient function for communicating with resource managers
   getVertexBufferByID(id) {
-    return this.renderer.bufferManager.getVertexBufferByID(id);
+    return this.renderer.bufferManager.getVertexBufferByID(this._vertexBufferIDs.get(id));
   }
 
   getVertexIndexBufferByID(id) {
-    return this.renderer.bufferManager.getVertexIndexBufferByID(id);
+    return this.renderer.bufferManager.getVertexIndexBufferByID(this._vertexBufferIDs.get(id));
   }
 
   getProgramByID(id) {
@@ -72,11 +87,16 @@ export class WebGLRenderableMesh {
     // We can add more default stuff here
     this.getProgramByID(this._programID).use();
 
+    const buffer0 = this.getVertexBufferByID('vertices');
+    const buffer1 = this.getVertexBufferByID('texCoords');
+    const buffer2 = this.getVertexBufferByID('color');
+    const buffer3 = this.getVertexIndexBufferByID('vertexIndices');
+
     this.getProgramByID(this._programID).setBuffers({
-      position: this.getVertexBufferByID(this._vertexBufferIDs[0]),
-      texCoords: this.getVertexBufferByID(this._vertexBufferIDs[1]),
-      color: this.getVertexBufferByID(this._vertexBufferIDs[2]),
-      index: this.getVertexIndexBufferByID(this._vertexIndexBufferID)
+      position: buffer0,
+      texCoords: buffer1,
+      color: buffer2,
+      index: buffer3
     });
 
     this.getProgramByID(this._programID).setUniforms({

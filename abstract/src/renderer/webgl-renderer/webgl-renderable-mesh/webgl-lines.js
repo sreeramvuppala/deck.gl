@@ -5,7 +5,7 @@ import {GL} from 'luma.gl';
 export default class WebGLLine extends WebGLRenderableMesh {
   constructor({line, renderer}) {
     super({mesh: line, renderer});
-    this._numberOfPrimitives = line.vertexIndices.length / 2;
+    this._numberOfPrimitives = line.attributes.get('vertexIndices').length / 2;
   }
 
   render(transformMatrices) {

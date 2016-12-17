@@ -95,7 +95,7 @@ class ExampleApp extends React.Component {
 
     const {layers} = this.state;
 
-    const numberOfPoints = 1000000;
+    const numberOfPoints = 100000;
     const range = 100.0;
     const scatterplotData = [];
     const scatterplotColor = [];
@@ -144,7 +144,7 @@ class ExampleApp extends React.Component {
 
     layers.push(norm);
 
-    //setInterval(this.handleTimerUpdate, 1000);
+    setInterval(this.handleTimerUpdate, 16);
   }
 
   componentWillReceiveProps(props) {
