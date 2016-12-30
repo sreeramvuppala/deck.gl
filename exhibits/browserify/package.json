@@ -1,9 +1,9 @@
 {
-  "name": "browserify-exhibit",
+  "name": "deckgl-layer-browser-example",
   "version": "0.0.0",
-  "description": "A browserify/deck.gl exhibit",
+  "description": "deck.gl layer browser example",
   "scripts": {
-    "link": "(cd .. && rm -f node_modules && ln -s browserify/node_modules)",
+    "build": "(cd .. && rm -f node_modules && ln -s browserify/node_modules)",
     "serve": "budo ../app.js --open -- -t babelify",
     "start": "npm run link && npm run serve"
   },
